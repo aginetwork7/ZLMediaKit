@@ -180,6 +180,9 @@ private:
     // 校验md5方式的认证加密  [AUTO-TRANSLATED:0cc37fa7]
     // Verify MD5 authentication encryption
     void onAuthDigest(const std::string &realm, const std::string &auth_md5);
+    // 校验SHA-256方式的认证加密  [AUTO-TRANSLATED:0cc37fa7]
+    // Verify SHA-256 authentication encryption
+    void onAuthSha256(const std::string &realm, const std::string &auth_sha256, const std::string &method);
     // 触发url鉴权事件  [AUTO-TRANSLATED:776dc4b5]
     // Trigger URL authentication event
     void emitOnPlay();
@@ -222,6 +225,7 @@ private:
     // 登录认证  [AUTO-TRANSLATED:43fdb875]
     // Login authentication
     std::string _auth_nonce;
+    std::string _auth_opaque;
     // 用于判断客户端是否超时  [AUTO-TRANSLATED:86cb328a]
     // Used to determine if the client has timed out
     toolkit::Ticker _alive_ticker;

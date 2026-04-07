@@ -395,6 +395,9 @@ namespace Rtsp {
 // 是否优先base64方式认证？默认Md5方式认证  [AUTO-TRANSLATED:0ea332b5]
 // Is base64 authentication prioritized? Default is Md5 authentication
 extern const std::string kAuthBasic;
+// 是否开启严格SHA-256认证，开启后仅允许Digest SHA-256  [AUTO-TRANSLATED:0ea332b5]
+// Whether to enable strict SHA-256 authentication. When enabled, only Digest SHA-256 is allowed
+extern const std::string kAuthStrictSha256;
 // 握手超时时间，默认15秒  [AUTO-TRANSLATED:6f69a65b]
 // Handshake timeout, default 15 seconds
 extern const std::string kHandshakeSecond;

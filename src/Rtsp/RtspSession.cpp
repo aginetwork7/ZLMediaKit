@@ -18,6 +18,10 @@
 #include "RtpMultiCaster.h"
 #include "Rtcp/RtcpContext.h"
 
+#ifdef ENABLE_OPENSSL
+#include <openssl/sha.h>
+#endif
+
 using namespace std;
 using namespace toolkit;
 
@@ -50,6 +54,19 @@ namespace mediakit {
 static unordered_map<string, weak_ptr<RtspSession> > g_mapGetter;
 //对g_mapGetter上锁保护
 static recursive_mutex g_mtxGetter;
+
+#ifdef ENABLE_OPENSSL
+static string sha256Hex(const string &input) {
+    unsigned char out[SHA256_DIGEST_LENGTH] = {0};
+    SHA256((const unsigned char *)input.data(), input.size(), out);
+    _StrPrinter printer;
+    printer << std::hex << std::setfill('0');
+    for (auto ch : out) {
+        printer << std::setw(2) << (int)ch;
+    }
+    return printer;
+}
+#endif
 
 RtspSession::RtspSession(const Socket::Ptr &sock) : Session(sock) {
     GET_CONFIG(uint32_t,keep_alive_sec,Rtsp::kKeepAliveSecond);
@@ -450,14 +467,22 @@ void RtspSession::onAuthSuccess() {
 }
 
 void RtspSession::onAuthFailed(const string &realm,const string &why,bool close) {
-    GET_CONFIG(bool, authBasic, Rtsp::kAuthBasic);
-    if (!authBasic) {
-        // 我们需要客户端优先以md5方式认证
-        _auth_nonce = makeRandStr(32);
-        sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Digest realm=\"" << realm << "\",nonce=\"" << _auth_nonce << "\"" });
+    GET_CONFIG(bool, strict_sha256, Rtsp::kAuthStrictSha256);
+    if (strict_sha256) {
+        _auth_nonce = encodeBase64(makeRandStr(16, false));
+        _auth_opaque = encodeBase64(makeRandStr(16, false));
+        sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Digest realm=\"" << realm << "\",nonce=\"" << _auth_nonce << "\",algorithm=SHA-256,qop=\"auth\",opaque=\"" << _auth_opaque << "\"" });
     } else {
-        // 当然我们也支持base64认证,但是我们不建议这样做
-        sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Basic realm=\"" << realm << "\"" });
+        GET_CONFIG(bool, authBasic, Rtsp::kAuthBasic);
+        if (!authBasic) {
+            // 我们需要客户端优先以md5方式认证
+            _auth_nonce = makeRandStr(32);
+            _auth_opaque.clear();
+            sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Digest realm=\"" << realm << "\",nonce=\"" << _auth_nonce << "\"" });
+        } else {
+            // 当然我们也支持base64认证,但是我们不建议这样做
+            sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Basic realm=\"" << realm << "\"" });
+        }
     }
     if (close) {
         shutdown(SockException(Err_shutdown, StrPrinter << "401 Unauthorized:" << why));
@@ -504,9 +529,7 @@ void RtspSession::onAuthBasic(const string &realm, const string &auth_base64) {
     if (!NOTICE_EMIT(BroadcastOnRtspAuthArgs, Broadcast::kBroadcastOnRtspAuth, _media_info, realm, user, true, invoker, *this)) {
         //表明该流需要认证却没监听请求密码事件，这一般是大意的程序所为，警告之
         WarnP(this) << "请监听kBroadcastOnRtspAuth事件！";
-        //但是我们还是忽略认证以便完成播放
-        //我们输入的密码是明文
-        invoker(false, pwd);
+        onAuthFailed(realm, "kBroadcastOnRtspAuth listener not found");
     }
 }
 
@@ -588,9 +611,117 @@ void RtspSession::onAuthDigest(const string &realm,const string &auth_md5){
     if(!NOTICE_EMIT(BroadcastOnRtspAuthArgs, Broadcast::kBroadcastOnRtspAuth, _media_info, realm, username, false, invoker, *this)){
         //表明该流需要认证却没监听请求密码事件，这一般是大意的程序所为，警告之
         WarnP(this) << "请监听kBroadcastOnRtspAuth事件！";
-        //但是我们还是忽略认证以便完成播放
-        realInvoker(true,true,"");
+        onAuthFailed(realm, "kBroadcastOnRtspAuth listener not found");
     }
+}
+
+void RtspSession::onAuthSha256(const string &realm, const string &auth_sha256, const string &method) {
+#ifndef ENABLE_OPENSSL
+    onAuthFailed(realm, "sha-256 auth requires ENABLE_OPENSSL");
+    return;
+#else
+    DebugP(this) << auth_sha256;
+    auto mapTmp = Parser::parseArgs(auth_sha256, ",", "=");
+    decltype(mapTmp) map;
+    for (auto &pr : mapTmp) {
+        map[trim(string(pr.first), " \"")] = trim(pr.second, " \"");
+    }
+    // check realm
+    if (realm != map["realm"]) {
+        onAuthFailed(realm, StrPrinter << "realm not mached:" << realm << " != " << map["realm"]);
+        return;
+    }
+    // check nonce
+    auto nonce = map["nonce"];
+    if (_auth_nonce != nonce) {
+        onAuthFailed(realm, StrPrinter << "nonce not mached:" << nonce << " != " << _auth_nonce);
+        return;
+    }
+    // check opaque
+    auto opaque = map["opaque"];
+    if (!_auth_opaque.empty() && _auth_opaque != opaque) {
+        onAuthFailed(realm, StrPrinter << "opaque not mached:" << opaque << " != " << _auth_opaque);
+        return;
+    }
+    // check username and uri
+    auto username = map["username"];
+    auto uri = map["uri"];
+    auto response = map["response"];
+    auto qop = map["qop"];
+    auto nc = map["nc"];
+    auto cnonce = map["cnonce"];
+    if (response.size() == 32) {
+        WarnP(this) << "client may not support digest sha-256: response length is 32 (looks like md5), auth=" << auth_sha256;
+        onAuthDigest(realm, auth_sha256);
+        return;
+    } else if (!response.empty() && response.size() != 64) {
+        WarnP(this) << "client digest response length is abnormal for sha-256, len=" << response.size() << ", auth=" << auth_sha256;
+    }
+    if (username.empty() || uri.empty() || response.empty()) {
+        WarnP(this) << "client digest fields incomplete for sha-256, auth=" << auth_sha256;
+        onAuthFailed(realm, StrPrinter << "username/uri/response empty:" << username << "," << uri << "," << response);
+        return;
+    }
+    if (!opaque.empty() && _auth_opaque != opaque) {
+        onAuthFailed(realm, StrPrinter << "opaque not mached:" << opaque << " != " << _auth_opaque);
+        return;
+    }
+
+    auto realInvoker = [this, realm, nonce, uri, username, response, qop, nc, cnonce, method](bool ignoreAuth, bool encrypted, const string &good_pwd) {
+        if (ignoreAuth) {
+            // 忽略认证
+            TraceP(this) << "auth ignored";
+            onAuthSuccess();
+            return;
+        }
+
+        // Digest SHA-256与MD5流程一致，仅哈希算法替换为SHA-256
+        auto encrypted_pwd = good_pwd;
+        if (!encrypted) {
+            // 提供的是明文密码
+            encrypted_pwd = sha256Hex(username + ":" + realm + ":" + good_pwd);
+        }
+
+        auto ha2 = sha256Hex(method + ":" + uri);
+        string good_response;
+        if (!qop.empty() && !nc.empty() && !cnonce.empty() && strcasecmp(qop.data(), "auth") == 0) {
+            good_response = sha256Hex(encrypted_pwd + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2);
+        } else {
+            // 宽松模式：兼容未携带qop/nc/cnonce的客户端
+            good_response = sha256Hex(encrypted_pwd + ":" + nonce + ":" + ha2);
+        }
+        if (strcasecmp(good_response.data(), response.data()) == 0) {
+            // 认证成功！sha256不区分大小写
+            onAuthSuccess();
+        } else {
+            // 认证失败！
+            onAuthFailed(realm, StrPrinter << "password mismatch when sha256 auth:" << good_response << " != " << response);
+        }
+    };
+
+    weak_ptr<RtspSession> weak_self = static_pointer_cast<RtspSession>(shared_from_this());
+    onAuth invoker = [realInvoker, weak_self](bool encrypted, const string &good_pwd) {
+        auto strong_self = weak_self.lock();
+        if (!strong_self) {
+            return;
+        }
+        // 切换到自己的线程确保realInvoker执行时，this指针有效
+        strong_self->async([realInvoker, weak_self, encrypted, good_pwd]() {
+            auto strong_self = weak_self.lock();
+            if (!strong_self) {
+                return;
+            }
+            realInvoker(false, encrypted, good_pwd);
+        });
+    };
+
+    // 此时可以提供明文或sha256加密的密码
+    if (!NOTICE_EMIT(BroadcastOnRtspAuthArgs, Broadcast::kBroadcastOnRtspAuth, _media_info, realm, username, false, invoker, *this)) {
+        // 表明该流需要认证却没监听请求密码事件，这一般是大意的程序所为，警告之
+        WarnP(this) << "请监听kBroadcastOnRtspAuth事件！";
+        onAuthFailed(realm, "kBroadcastOnRtspAuth listener not found");
+    }
+#endif
 }
 
 void RtspSession::onAuthUser(const string &realm,const string &authorization){
@@ -607,11 +738,36 @@ void RtspSession::onAuthUser(const string &realm,const string &authorization){
         return;
     }
     if(authType == "Basic"){
-        //base64认证，需要明文密码
-        onAuthBasic(realm,authStr);
+        GET_CONFIG(bool, strict_sha256, Rtsp::kAuthStrictSha256);
+        if (strict_sha256) {
+            WarnP(this) << "client uses basic auth but server requires digest sha-256";
+            onAuthFailed(realm, "basic auth is disabled, only digest SHA-256 is allowed");
+        } else {
+            onAuthBasic(realm, authStr);
+        }
     }else if(authType == "Digest"){
-        //md5认证
-        onAuthDigest(realm,authStr);
+        GET_CONFIG(bool, strict_sha256, Rtsp::kAuthStrictSha256);
+        auto mapTmp = Parser::parseArgs(authStr, ",", "=");
+        auto algorithm = trim(string(mapTmp["algorithm"]), " \"");
+        auto response = trim(string(mapTmp["response"]), " \"");
+        if (strict_sha256) {
+            if (algorithm.empty() || strcasecmp(algorithm.data(), "SHA-256") == 0) {
+                // 严格模式：只允许sha-256
+                onAuthSha256(realm, authStr, "DESCRIBE");
+            } else {
+                onAuthFailed(realm, StrPrinter << "unsupported digest algorithm:" << algorithm << ", strict SHA-256 required");
+            }
+        } else {
+            // 非严格模式：md5和sha256并存，优先原生md5
+            if (algorithm.empty() || strcasecmp(algorithm.data(), "MD5") == 0 || response.size() == 32) {
+                onAuthDigest(realm, authStr);
+            } else if (strcasecmp(algorithm.data(), "SHA-256") == 0) {
+                onAuthSha256(realm, authStr, "DESCRIBE");
+            } else {
+                // 未知算法默认按md5尝试
+                onAuthDigest(realm, authStr);
+            }
+        }
     }else{
         //其他认证方式？不支持！
         onAuthFailed(realm,StrPrinter << "unsupported auth type:" << authType);

@@ -242,6 +242,7 @@ static onceToken token([]() { mINI::Instance()[kMaxReqSize] = 1024; });
 namespace Rtsp {
 #define RTSP_FIELD "rtsp."
 const string kAuthBasic = RTSP_FIELD "authBasic";
+const string kAuthStrictSha256 = RTSP_FIELD "authStrictSha256";
 const string kHandshakeSecond = RTSP_FIELD "handshakeSecond";
 const string kKeepAliveSecond = RTSP_FIELD "keepAliveSecond";
 const string kDirectProxy = RTSP_FIELD "directProxy";
@@ -252,6 +253,7 @@ static onceToken token([]() {
     // 默认Md5方式认证  [AUTO-TRANSLATED:6155d989]
     // Default Md5 authentication
     mINI::Instance()[kAuthBasic] = 0;
+    mINI::Instance()[kAuthStrictSha256] = 0;
     mINI::Instance()[kHandshakeSecond] = 15;
     mINI::Instance()[kKeepAliveSecond] = 15;
     mINI::Instance()[kDirectProxy] = 1;

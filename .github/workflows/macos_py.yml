@@ -1,6 +1,6 @@
 name: macOS_Python
 
-on: [push, pull_request]
+on: workflow_dispatch
 
 jobs:
   build:

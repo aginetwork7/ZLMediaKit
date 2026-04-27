@@ -13,6 +13,17 @@
 #include <sys/stat.h>
 #include "Util/File.h"
 #include "Common/config.h"
+
+namespace {
+std::string getUTCTimeStr(const char *fmt) {
+    auto now = ::time(nullptr);
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    char buf[128];
+    std::strftime(buf, sizeof(buf), fmt, &tm);
+    return buf;
+}
+} // namespace
 #include "MP4Recorder.h"
 #include "Thread/WorkThreadPool.h"
 #include "MP4Muxer.h"
@@ -42,8 +53,8 @@ MP4Recorder::~MP4Recorder() {
 
 void MP4Recorder::createFile() {
     closeFile();
-    auto date = getTimeStr("%Y-%m-%d");
-    auto file_name = date + "-" + getTimeStr("%H-%M-%S") + "-" + std::to_string(_file_index++) + ".mp4";
+    auto date = getUTCTimeStr("%Y-%m-%d");
+    auto file_name = date + "-" + getUTCTimeStr("%H-%M-%S") + "-" + std::to_string(_file_index++) + ".mp4";
     auto full_path = _info.folder + date + "/" + file_name;
     auto full_path_tmp = _info.folder + date + "/." + file_name;
 

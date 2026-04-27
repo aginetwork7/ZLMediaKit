@@ -398,6 +398,12 @@ extern const std::string kAuthBasic;
 // 是否开启严格SHA-256认证，开启后仅允许Digest SHA-256  [AUTO-TRANSLATED:0ea332b5]
 // Whether to enable strict SHA-256 authentication. When enabled, only Digest SHA-256 is allowed
 extern const std::string kAuthStrictSha256;
+// RTSP鉴权用户文件路径，JSON格式: {"username":"x","password":"x"}
+// RTSP auth user file path, JSON format: {"username":"x","password":"x"}
+extern const std::string kAuthFile;
+// RTSP鉴权realm，配合kAuthFile使用
+// RTSP auth realm, used with kAuthFile
+extern const std::string kAuthRealm;
 // 握手超时时间，默认15秒  [AUTO-TRANSLATED:6f69a65b]
 // Handshake timeout, default 15 seconds
 extern const std::string kHandshakeSecond;

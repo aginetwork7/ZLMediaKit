@@ -243,6 +243,8 @@ namespace Rtsp {
 #define RTSP_FIELD "rtsp."
 const string kAuthBasic = RTSP_FIELD "authBasic";
 const string kAuthStrictSha256 = RTSP_FIELD "authStrictSha256";
+const string kAuthFile = RTSP_FIELD "authFile";
+const string kAuthRealm = RTSP_FIELD "authRealm";
 const string kHandshakeSecond = RTSP_FIELD "handshakeSecond";
 const string kKeepAliveSecond = RTSP_FIELD "keepAliveSecond";
 const string kDirectProxy = RTSP_FIELD "directProxy";
@@ -254,6 +256,8 @@ static onceToken token([]() {
     // Default Md5 authentication
     mINI::Instance()[kAuthBasic] = 0;
     mINI::Instance()[kAuthStrictSha256] = 0;
+    mINI::Instance()[kAuthFile] = "";
+    mINI::Instance()[kAuthRealm] = "tinynvr";
     mINI::Instance()[kHandshakeSecond] = 15;
     mINI::Instance()[kKeepAliveSecond] = 15;
     mINI::Instance()[kDirectProxy] = 1;

@@ -9,6 +9,7 @@
  */
 
 #include <atomic>
+#include <fstream>
 #include <iomanip>
 #include "Common/config.h"
 #include "UDPServer.h"
@@ -17,6 +18,7 @@
 #include "Util/base64.h"
 #include "RtpMultiCaster.h"
 #include "Rtcp/RtcpContext.h"
+#include "json/json.h"
 
 #ifdef ENABLE_OPENSSL
 #include <openssl/sha.h>
@@ -26,6 +28,28 @@ using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
+
+// Load RTSP auth credentials from a JSON file.
+// File format: {"username":"xxx","password":"xxx"}
+static bool loadRtspAuthFile(const string &path, string &username, string &password) {
+    if (path.empty()) {
+        return false;
+    }
+    ifstream ifs(path);
+    if (!ifs.is_open()) {
+        return false;
+    }
+    Json::Value root;
+    Json::CharReaderBuilder builder;
+    string errs;
+    if (!Json::parseFromStream(builder, ifs, &root, &errs)) {
+        WarnL << "rtsp authFile parse failed: " << errs;
+        return false;
+    }
+    username = root["username"].asString();
+    password = root["password"].asString();
+    return !username.empty() && !password.empty();
+}
 
 /**
  * rtsp协议有多种方式传输rtp数据包，目前已支持包括以下4种
@@ -412,10 +436,16 @@ void RtspSession::handleReq_Describe(const Parser &parser) {
     };
 
     if(_rtsp_realm.empty()){
-        //广播是否需要rtsp专属认证事件
-        if (!NOTICE_EMIT(BroadcastOnGetRtspRealmArgs, Broadcast::kBroadcastOnGetRtspRealm, _media_info, invoker, *this)) {
-            //无人监听此事件，说明无需认证
-            invoker("");
+        // File-based auth: always require authentication
+        GET_CONFIG(string, auth_file, Rtsp::kAuthFile);
+        if (!auth_file.empty()) {
+            GET_CONFIG(string, auth_realm, Rtsp::kAuthRealm);
+            invoker(auth_realm.empty() ? "tinynvr" : auth_realm);
+        } else {
+            //未配置authFile，走原有事件广播逻辑
+            if (!NOTICE_EMIT(BroadcastOnGetRtspRealmArgs, Broadcast::kBroadcastOnGetRtspRealm, _media_info, invoker, *this)) {
+                invoker("");
+            }
         }
     }else{
         invoker(_rtsp_realm);
@@ -526,6 +556,14 @@ void RtspSession::onAuthBasic(const string &realm, const string &auth_base64) {
     };
 
     //此时必须提供明文密码
+    GET_CONFIG(string, auth_file_basic, Rtsp::kAuthFile);
+    {
+        string file_user, file_pwd;
+        if (loadRtspAuthFile(auth_file_basic, file_user, file_pwd) && user == file_user) {
+            invoker(false, file_pwd);
+            return;
+        }
+    }
     if (!NOTICE_EMIT(BroadcastOnRtspAuthArgs, Broadcast::kBroadcastOnRtspAuth, _media_info, realm, user, true, invoker, *this)) {
         //表明该流需要认证却没监听请求密码事件，这一般是大意的程序所为，警告之
         WarnP(this) << "请监听kBroadcastOnRtspAuth事件！";
@@ -608,6 +646,14 @@ void RtspSession::onAuthDigest(const string &realm,const string &auth_md5){
     };
 
     //此时可以提供明文或md5加密的密码
+    GET_CONFIG(string, auth_file_digest, Rtsp::kAuthFile);
+    {
+        string file_user, file_pwd;
+        if (loadRtspAuthFile(auth_file_digest, file_user, file_pwd) && username == file_user) {
+            invoker(false, file_pwd);
+            return;
+        }
+    }
     if(!NOTICE_EMIT(BroadcastOnRtspAuthArgs, Broadcast::kBroadcastOnRtspAuth, _media_info, realm, username, false, invoker, *this)){
         //表明该流需要认证却没监听请求密码事件，这一般是大意的程序所为，警告之
         WarnP(this) << "请监听kBroadcastOnRtspAuth事件！";
@@ -716,6 +762,14 @@ void RtspSession::onAuthSha256(const string &realm, const string &auth_sha256, c
     };
 
     // 此时可以提供明文或sha256加密的密码
+    GET_CONFIG(string, auth_file_sha256, Rtsp::kAuthFile);
+    {
+        string file_user, file_pwd;
+        if (loadRtspAuthFile(auth_file_sha256, file_user, file_pwd) && username == file_user) {
+            invoker(false, file_pwd);
+            return;
+        }
+    }
     if (!NOTICE_EMIT(BroadcastOnRtspAuthArgs, Broadcast::kBroadcastOnRtspAuth, _media_info, realm, username, false, invoker, *this)) {
         // 表明该流需要认证却没监听请求密码事件，这一般是大意的程序所为，警告之
         WarnP(this) << "请监听kBroadcastOnRtspAuth事件！";

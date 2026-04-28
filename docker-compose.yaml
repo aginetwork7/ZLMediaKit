@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  zlmediakit:
+    image: ${IMAGES_REGISTRY}/zlmediakit:${ZLM_IMAGE_TAG:?set ZLM_IMAGE_TAG}
+    container_name: zlmediakit
+    ports:
+      - "8089:8089"
+      - "554:554"
+    volumes:
+      - /data/agi7/zlmediakit/config:/opt/media/conf
+      - /data/agi7/tinynvr/auth:/opt/media/auth
+      - /data/agi7/zlmediakit/log:/opt/media/bin/ffmpeg
+      - /data/agi7/zlmediakit/record:/opt/media/bin/www
+    restart: unless-stopped

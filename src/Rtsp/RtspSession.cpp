@@ -425,28 +425,19 @@ void RtspSession::handleReq_Describe(const Parser &parser) {
                 return;
             }
             if (realm.empty()) {
-                //无需rtsp专属认证, 那么继续url通用鉴权认证(on_play)
-                strong_self->emitOnPlay();
+                //realm为空，鉴权失败
+                strong_self->onAuthFailed("unknown", "realm is empty, auth rejected");
                 return;
             }
-            //该流需要rtsp专属认证，开启rtsp专属认证后，将不再触发url通用鉴权认证(on_play)
             strong_self->_rtsp_realm = realm;
             strong_self->onAuthUser(realm, authorization);
         });
     };
 
     if(_rtsp_realm.empty()){
-        // File-based auth: always require authentication
-        GET_CONFIG(string, auth_file, Rtsp::kAuthFile);
-        if (!auth_file.empty()) {
-            GET_CONFIG(string, auth_realm, Rtsp::kAuthRealm);
-            invoker(auth_realm.empty() ? "tinynvr" : auth_realm);
-        } else {
-            //未配置authFile，走原有事件广播逻辑
-            if (!NOTICE_EMIT(BroadcastOnGetRtspRealmArgs, Broadcast::kBroadcastOnGetRtspRealm, _media_info, invoker, *this)) {
-                invoker("");
-            }
-        }
+        GET_CONFIG(string, auth_realm, Rtsp::kAuthRealm);
+        //realm配置为空时使用默认值
+        invoker(auth_realm.empty() ? "tinynvr" : auth_realm);
     }else{
         invoker(_rtsp_realm);
     }
@@ -498,21 +489,14 @@ void RtspSession::onAuthSuccess() {
 
 void RtspSession::onAuthFailed(const string &realm,const string &why,bool close) {
     GET_CONFIG(bool, strict_sha256, Rtsp::kAuthStrictSha256);
+    //只使用digest模式；严格模式只发SHA-256 challenge，非严格模式也发SHA-256 challenge但接受MD5 fallback
+    _auth_nonce = encodeBase64(makeRandStr(16, false));
+    _auth_opaque = encodeBase64(makeRandStr(16, false));
     if (strict_sha256) {
-        _auth_nonce = encodeBase64(makeRandStr(16, false));
-        _auth_opaque = encodeBase64(makeRandStr(16, false));
         sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Digest realm=\"" << realm << "\",nonce=\"" << _auth_nonce << "\",algorithm=SHA-256,qop=\"auth\",opaque=\"" << _auth_opaque << "\"" });
     } else {
-        GET_CONFIG(bool, authBasic, Rtsp::kAuthBasic);
-        if (!authBasic) {
-            // 我们需要客户端优先以md5方式认证
-            _auth_nonce = makeRandStr(32);
-            _auth_opaque.clear();
-            sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Digest realm=\"" << realm << "\",nonce=\"" << _auth_nonce << "\"" });
-        } else {
-            // 当然我们也支持base64认证,但是我们不建议这样做
-            sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Basic realm=\"" << realm << "\"" });
-        }
+        //非严格模式：发SHA-256 challenge，客户端不支持SHA-256时会fallback到MD5响应，onAuthUser中接受两种
+        sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Digest realm=\"" << realm << "\",nonce=\"" << _auth_nonce << "\",qop=\"auth\",opaque=\"" << _auth_opaque << "\"" });
     }
     if (close) {
         shutdown(SockException(Err_shutdown, StrPrinter << "401 Unauthorized:" << why));
@@ -557,12 +541,18 @@ void RtspSession::onAuthBasic(const string &realm, const string &auth_base64) {
 
     //此时必须提供明文密码
     GET_CONFIG(string, auth_file_basic, Rtsp::kAuthFile);
-    {
+    if (!auth_file_basic.empty()) {
         string file_user, file_pwd;
-        if (loadRtspAuthFile(auth_file_basic, file_user, file_pwd) && user == file_user) {
-            invoker(false, file_pwd);
+        if (!loadRtspAuthFile(auth_file_basic, file_user, file_pwd)) {
+            onAuthFailed(realm, "rtsp authFile load failed or credentials empty");
             return;
         }
+        if (user != file_user) {
+            onAuthFailed(realm, StrPrinter << "username mismatch: " << user << " != " << file_user);
+            return;
+        }
+        invoker(false, file_pwd);
+        return;
     }
     if (!NOTICE_EMIT(BroadcastOnRtspAuthArgs, Broadcast::kBroadcastOnRtspAuth, _media_info, realm, user, true, invoker, *this)) {
         //表明该流需要认证却没监听请求密码事件，这一般是大意的程序所为，警告之
@@ -647,12 +637,18 @@ void RtspSession::onAuthDigest(const string &realm,const string &auth_md5){
 
     //此时可以提供明文或md5加密的密码
     GET_CONFIG(string, auth_file_digest, Rtsp::kAuthFile);
-    {
+    if (!auth_file_digest.empty()) {
         string file_user, file_pwd;
-        if (loadRtspAuthFile(auth_file_digest, file_user, file_pwd) && username == file_user) {
-            invoker(false, file_pwd);
+        if (!loadRtspAuthFile(auth_file_digest, file_user, file_pwd)) {
+            onAuthFailed(realm, "rtsp authFile load failed or credentials empty");
             return;
         }
+        if (username != file_user) {
+            onAuthFailed(realm, StrPrinter << "username mismatch: " << username << " != " << file_user);
+            return;
+        }
+        invoker(false, file_pwd);
+        return;
     }
     if(!NOTICE_EMIT(BroadcastOnRtspAuthArgs, Broadcast::kBroadcastOnRtspAuth, _media_info, realm, username, false, invoker, *this)){
         //表明该流需要认证却没监听请求密码事件，这一般是大意的程序所为，警告之
@@ -708,10 +704,6 @@ void RtspSession::onAuthSha256(const string &realm, const string &auth_sha256, c
         onAuthFailed(realm, StrPrinter << "username/uri/response empty:" << username << "," << uri << "," << response);
         return;
     }
-    if (!opaque.empty() && _auth_opaque != opaque) {
-        onAuthFailed(realm, StrPrinter << "opaque not mached:" << opaque << " != " << _auth_opaque);
-        return;
-    }
 
     auto realInvoker = [this, realm, nonce, uri, username, response, qop, nc, cnonce, method](bool ignoreAuth, bool encrypted, const string &good_pwd) {
         if (ignoreAuth) {
@@ -763,15 +755,20 @@ void RtspSession::onAuthSha256(const string &realm, const string &auth_sha256, c
 
     // 此时可以提供明文或sha256加密的密码
     GET_CONFIG(string, auth_file_sha256, Rtsp::kAuthFile);
-    {
+    if (!auth_file_sha256.empty()) {
         string file_user, file_pwd;
-        if (loadRtspAuthFile(auth_file_sha256, file_user, file_pwd) && username == file_user) {
-            invoker(false, file_pwd);
+        if (!loadRtspAuthFile(auth_file_sha256, file_user, file_pwd)) {
+            onAuthFailed(realm, "rtsp authFile load failed or credentials empty");
             return;
         }
+        if (username != file_user) {
+            onAuthFailed(realm, StrPrinter << "username mismatch: " << username << " != " << file_user);
+            return;
+        }
+        invoker(false, file_pwd);
+        return;
     }
     if (!NOTICE_EMIT(BroadcastOnRtspAuthArgs, Broadcast::kBroadcastOnRtspAuth, _media_info, realm, username, false, invoker, *this)) {
-        // 表明该流需要认证却没监听请求密码事件，这一般是大意的程序所为，警告之
         WarnP(this) << "请监听kBroadcastOnRtspAuth事件！";
         onAuthFailed(realm, "kBroadcastOnRtspAuth listener not found");
     }
@@ -792,33 +789,29 @@ void RtspSession::onAuthUser(const string &realm,const string &authorization){
         return;
     }
     if(authType == "Basic"){
-        GET_CONFIG(bool, strict_sha256, Rtsp::kAuthStrictSha256);
-        if (strict_sha256) {
-            WarnP(this) << "client uses basic auth but server requires digest sha-256";
-            onAuthFailed(realm, "basic auth is disabled, only digest SHA-256 is allowed");
-        } else {
-            onAuthBasic(realm, authStr);
-        }
+        //只允许digest模式，拒绝basic
+        WarnP(this) << "client uses basic auth but server only accepts digest";
+        onAuthFailed(realm, "basic auth is disabled, only digest is allowed");
     }else if(authType == "Digest"){
         GET_CONFIG(bool, strict_sha256, Rtsp::kAuthStrictSha256);
         auto mapTmp = Parser::parseArgs(authStr, ",", "=");
         auto algorithm = trim(string(mapTmp["algorithm"]), " \"");
         auto response = trim(string(mapTmp["response"]), " \"");
         if (strict_sha256) {
+            //严格模式：只允许SHA-256
             if (algorithm.empty() || strcasecmp(algorithm.data(), "SHA-256") == 0) {
-                // 严格模式：只允许sha-256
                 onAuthSha256(realm, authStr, "DESCRIBE");
             } else {
                 onAuthFailed(realm, StrPrinter << "unsupported digest algorithm:" << algorithm << ", strict SHA-256 required");
             }
         } else {
-            // 非严格模式：md5和sha256并存，优先原生md5
-            if (algorithm.empty() || strcasecmp(algorithm.data(), "MD5") == 0 || response.size() == 32) {
-                onAuthDigest(realm, authStr);
-            } else if (strcasecmp(algorithm.data(), "SHA-256") == 0) {
+            //非严格模式：优先SHA-256，客户端不支持时fallback到MD5
+            if (strcasecmp(algorithm.data(), "SHA-256") == 0 && response.size() == 64) {
                 onAuthSha256(realm, authStr, "DESCRIBE");
+            } else if (algorithm.empty() || strcasecmp(algorithm.data(), "MD5") == 0 || response.size() == 32) {
+                onAuthDigest(realm, authStr);
             } else {
-                // 未知算法默认按md5尝试
+                //未知算法默认按md5尝试
                 onAuthDigest(realm, authStr);
             }
         }

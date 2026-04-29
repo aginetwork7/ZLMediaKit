@@ -8,8 +8,7 @@ services:
       - "8089:8089"
       - "554:554"
     volumes:
-      - /data/agi7/zlmediakit/config:/opt/media/conf
       - /data/agi7/tinynvr/auth:/opt/media/auth
-      - /data/agi7/zlmediakit/log:/opt/media/bin/ffmpeg
-      - /data/agi7/zlmediakit/record:/opt/media/bin/www
+      - /data/agi7/zlmediakit/log:/opt/media/bin/log
+      - /data/agi7/zlmediakit/record:/opt/media/bin/www/record
     restart: unless-stopped

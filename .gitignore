@@ -49,3 +49,10 @@
 /ios/
 /cmake-build-*
 /3rdpart/ZLToolKit/cmake-build-mq/
+
+# Local docker build artifacts
+/tools/docker.local/cmake/
+/tools/docker.local/build/
+/tools/docker.local/build.linux.*/
+/tools/docker.local/release/
+/tools/docker.local/.docker-local-context-*/

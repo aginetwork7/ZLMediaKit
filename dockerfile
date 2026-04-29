@@ -1,15 +1,8 @@
 FROM ubuntu:24.04 AS build
 ARG MODEL=Release
-#shell,rtmp,rtsp,rtsps,http,https,rtp
-EXPOSE 1935/tcp
+#rtsp,http
 EXPOSE 554/tcp
-EXPOSE 80/tcp
-EXPOSE 443/tcp
-EXPOSE 10000/udp
-EXPOSE 10000/tcp
-EXPOSE 8000/udp
-EXPOSE 8000/tcp
-EXPOSE 9000/udp
+EXPOSE 8089/tcp
 
 # ADD sources.list /etc/apt/sources.list
 
@@ -51,7 +44,7 @@ WORKDIR /opt/media/ZLMediaKit/build
 RUN cmake -DENABLE_PYTHON=true -DCMAKE_BUILD_TYPE=${MODEL} -DENABLE_WEBRTC=true -DENABLE_FFMPEG=true -DENABLE_TESTS=false -DENABLE_API=false .. && \
     make -j $(nproc)
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS runtime
 ARG MODEL=Release
 
 # ADD sources.list /etc/apt/sources.list
@@ -59,20 +52,9 @@ ARG MODEL=Release
 RUN apt-get update && \
          DEBIAN_FRONTEND="noninteractive" \
          apt-get install -y --no-install-recommends \
-         vim \
-         wget \
          ca-certificates \
          tzdata \
-         curl \
-         libssl-dev \
-         ffmpeg \
-         gcc \
-         g++ \
-         python3 \
-         python3-dev \
-         python3-venv \
-         python3-pip \
-         gdb && \
+        openssl && \
          apt-get autoremove -y && \
          apt-get clean -y && \
     rm -rf /var/lib/apt/lists/*
@@ -80,11 +62,12 @@ RUN apt-get update && \
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
         && echo $TZ > /etc/timezone && \
-        mkdir -p /opt/media/bin/www
+    mkdir -p /opt/media/bin/www /opt/media/conf /opt/media/bin/log
 
 WORKDIR /opt/media/bin/
 COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/MediaServer /opt/media/ZLMediaKit/default.pem /opt/media/bin/
 COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/config.ini /opt/media/conf/
 COPY --from=build /opt/media/ZLMediaKit/www/ /opt/media/bin/www/
+
 ENV PATH /opt/media/bin:$PATH
-CMD ["./MediaServer","-s", "default.pem", "-c", "../conf/config.ini", "-l","0"]
+CMD ["./MediaServer","-s", "default.pem", "-c", "../conf/config.ini", "--log-dir", "/opt/media/bin/log", "-l","0"]

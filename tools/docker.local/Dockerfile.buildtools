@@ -1,0 +1,16 @@
+FROM ubuntu:24.04
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND="noninteractive" apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    pkg-config \
+    ca-certificates \
+    net-tools \
+    iputils-ping \
+    libssl-dev \
+    python3 \
+    python3-dev && \
+    apt-get autoremove -y && \
+    apt-get clean -y && \
+    rm -rf /var/lib/apt/lists/*

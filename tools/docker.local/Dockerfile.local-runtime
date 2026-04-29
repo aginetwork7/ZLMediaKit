@@ -1,0 +1,37 @@
+FROM ubuntu:24.04
+
+ARG MODEL=Release
+
+# Runtime dependencies only. No source checkout and no compilation.
+RUN apt-get update && \
+    DEBIAN_FRONTEND="noninteractive" apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tzdata \
+    openssl \
+    net-tools \
+    iputils-ping && \
+    apt-get autoremove -y && \
+    apt-get clean -y && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    echo $TZ > /etc/timezone && \
+    mkdir -p /opt/media/bin/www /opt/media/bin/www/record /opt/media/conf /opt/media/bin/log /opt/media/auth
+
+WORKDIR /opt/media/bin
+
+# Use prebuilt local artifacts only.
+# Expect these files to exist in build context:
+# - release/linux/${MODEL}/MediaServer
+# - release/linux/${MODEL}/config.ini
+# - www/* (including webassist static assets)
+# - default.pem
+COPY release/linux/${MODEL}/MediaServer /opt/media/bin/
+COPY release/linux/${MODEL}/config.ini /opt/media/conf/
+COPY www/ /opt/media/bin/www/
+COPY default.pem /opt/media/bin/
+
+EXPOSE 8089 554
+
+CMD ["./MediaServer", "-s", "default.pem", "-c", "../conf/config.ini", "--log-dir", "/opt/media/bin/log", "-l", "0"]

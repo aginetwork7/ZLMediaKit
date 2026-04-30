@@ -9,8 +9,10 @@
  */
 
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
+#include <sys/stat.h>
 #include "Common/config.h"
 #include "UDPServer.h"
 #include "RtspSession.h"
@@ -29,26 +31,112 @@ using namespace toolkit;
 
 namespace mediakit {
 
+static constexpr uint64_t kRtspAuthFileCheckIntervalMs = 5 * 60 * 1000;
+
+struct RtspAuthFileCache {
+    string path;
+    string username;
+    string password;
+    time_t mtime = 0;
+    uint64_t last_check_ms = 0;
+    bool loaded = false;
+};
+
+static RtspAuthFileCache g_rtspAuthFileCache;
+static recursive_mutex g_mtxRtspAuthFileCache;
+
+static uint64_t getCurrentTickMs() {
+    return chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static bool getFileMTime(const string &path, time_t &mtime) {
+    struct stat st = {0};
+    if (::stat(path.c_str(), &st) != 0) {
+        return false;
+    }
+    mtime = st.st_mtime;
+    return true;
+}
+
 // Load RTSP auth credentials from a JSON file.
 // File format: {"username":"xxx","password":"xxx"}
 static bool loadRtspAuthFile(const string &path, string &username, string &password) {
     if (path.empty()) {
         return false;
     }
-    ifstream ifs(path);
-    if (!ifs.is_open()) {
+
+    lock_guard<recursive_mutex> lock(g_mtxRtspAuthFileCache);
+    auto &cache = g_rtspAuthFileCache;
+    auto same_path = cache.loaded && cache.path == path;
+    auto now_ms = getCurrentTickMs();
+    if (same_path && now_ms - cache.last_check_ms < kRtspAuthFileCheckIntervalMs) {
+        username = cache.username;
+        password = cache.password;
+        return true;
+    }
+    cache.last_check_ms = now_ms;
+
+    time_t mtime = 0;
+    if (!getFileMTime(path, mtime)) {
+        if (same_path) {
+            WarnL << "rtsp authFile stat failed, keep cached credentials: " << path;
+            username = cache.username;
+            password = cache.password;
+            return true;
+        }
         return false;
     }
+
+    if (same_path && cache.mtime == mtime) {
+        username = cache.username;
+        password = cache.password;
+        return true;
+    }
+
+    ifstream ifs(path);
+    if (!ifs.is_open()) {
+        if (same_path) {
+            WarnL << "rtsp authFile open failed, keep cached credentials: " << path;
+            username = cache.username;
+            password = cache.password;
+            return true;
+        }
+        return false;
+    }
+
     Json::Value root;
     Json::CharReaderBuilder builder;
     string errs;
     if (!Json::parseFromStream(builder, ifs, &root, &errs)) {
-        WarnL << "rtsp authFile parse failed: " << errs;
+        WarnL << "rtsp authFile parse failed: " << path << ", err: " << errs;
+        if (same_path) {
+            username = cache.username;
+            password = cache.password;
+            return true;
+        }
         return false;
     }
-    username = root["username"].asString();
-    password = root["password"].asString();
-    return !username.empty() && !password.empty();
+
+    auto new_username = root["username"].asString();
+    auto new_password = root["password"].asString();
+    if (new_username.empty() || new_password.empty()) {
+        WarnL << "rtsp authFile missing username/password: " << path;
+        if (same_path) {
+            username = cache.username;
+            password = cache.password;
+            return true;
+        }
+        return false;
+    }
+
+    cache.path = path;
+    cache.username = std::move(new_username);
+    cache.password = std::move(new_password);
+    cache.mtime = mtime;
+    cache.loaded = true;
+    username = cache.username;
+    password = cache.password;
+    return true;
 }
 
 /**
@@ -81,14 +169,18 @@ static recursive_mutex g_mtxGetter;
 
 #ifdef ENABLE_OPENSSL
 static string sha256Hex(const string &input) {
-    unsigned char out[SHA256_DIGEST_LENGTH] = {0};
-    SHA256((const unsigned char *)input.data(), input.size(), out);
-    _StrPrinter printer;
-    printer << std::hex << std::setfill('0');
-    for (auto ch : out) {
-        printer << std::setw(2) << (int)ch;
+    unsigned char out[SHA256_DIGEST_LENGTH];
+    if (!SHA256((const unsigned char *)input.data(), input.size(), out)) {
+        return "";
     }
-    return printer;
+    static constexpr char kHex[] = "0123456789abcdef";
+    string ret;
+    ret.resize(SHA256_DIGEST_LENGTH * 2);
+    for (size_t i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+        ret[i * 2] = kHex[out[i] >> 4];
+        ret[i * 2 + 1] = kHex[out[i] & 0x0F];
+    }
+    return ret;
 }
 #endif
 
@@ -692,12 +784,10 @@ void RtspSession::onAuthSha256(const string &realm, const string &auth_sha256, c
     auto qop = map["qop"];
     auto nc = map["nc"];
     auto cnonce = map["cnonce"];
-    if (response.size() == 32) {
-        WarnP(this) << "client may not support digest sha-256: response length is 32 (looks like md5), auth=" << auth_sha256;
-        onAuthDigest(realm, auth_sha256);
+    if (!response.empty() && response.size() != 64) {
+        WarnP(this) << "client digest response length is invalid for sha-256, len=" << response.size() << ", auth=" << auth_sha256;
+        onAuthFailed(realm, StrPrinter << "invalid sha-256 digest response length:" << response.size());
         return;
-    } else if (!response.empty() && response.size() != 64) {
-        WarnP(this) << "client digest response length is abnormal for sha-256, len=" << response.size() << ", auth=" << auth_sha256;
     }
     if (username.empty() || uri.empty() || response.empty()) {
         WarnP(this) << "client digest fields incomplete for sha-256, auth=" << auth_sha256;

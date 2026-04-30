@@ -17,11 +17,16 @@
 namespace {
 std::string getUTCTimeStr(const char *fmt) {
     auto now = ::time(nullptr);
-    struct tm tm;
-    gmtime_r(&now, &tm);
-    char buf[128];
-    std::strftime(buf, sizeof(buf), fmt, &tm);
-    return buf;
+    struct tm tm = {};
+    if (!gmtime_r(&now, &tm)) {
+        return "";
+    }
+    char buf[128] = {0};
+    auto len = std::strftime(buf, sizeof(buf), fmt, &tm);
+    if (len == 0) {
+        return "";
+    }
+    return std::string(buf, len);
 }
 } // namespace
 #include "MP4Recorder.h"

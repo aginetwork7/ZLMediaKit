@@ -11,6 +11,7 @@
 #ifdef ENABLE_MP4
 #include <ctime>
 #include <sys/stat.h>
+#include <dirent.h>
 #include "Util/File.h"
 #include "Common/config.h"
 
@@ -30,6 +31,7 @@ std::string getUTCTimeStr(const char *fmt) {
 }
 } // namespace
 #include "MP4Recorder.h"
+#include "MP4Demuxer.h"
 #include "Thread/WorkThreadPool.h"
 #include "MP4Muxer.h"
 
@@ -108,6 +110,46 @@ void MP4Recorder::asyncClose() {
                 File::delete_file(full_path_tmp);
                 return;
             }
+
+            // 根据实际录制时长计算 End 时间，重建文件名为 start_end 格式
+            // Compute end time from actual duration, rebuild filename with start_end scheme
+            // 半开区间 [Begin, End)：End = Start + 截断秒数
+            // Half-open interval [Begin, End): End = Start + truncated seconds
+            time_t end_time = info.start_time + (time_t)(info.time_len);
+            struct tm start_tm = {}, end_tm = {};
+            gmtime_r(&info.start_time, &start_tm);
+            gmtime_r(&end_time, &end_tm);
+
+            // 从原始文件名提取 file index（最后一个 '-' 与 '.mp4' 之间的部分）
+            // Extract file index from original filename (between last '-' and '.mp4')
+            auto dot_pos = info.file_name.rfind(".mp4");
+            auto dash_pos = (dot_pos != std::string::npos) ? info.file_name.rfind('-', dot_pos) : std::string::npos;
+            std::string index_str = "0";
+            if (dash_pos != std::string::npos && dot_pos != std::string::npos) {
+                index_str = info.file_name.substr(dash_pos + 1, dot_pos - dash_pos - 1);
+            }
+
+            char new_name[128] = {0};
+            snprintf(new_name, sizeof(new_name),
+                     "%04d-%02d-%02d-%02d-%02d-%02d_%04d-%02d-%02d-%02d-%02d-%02d-%s.mp4",
+                     start_tm.tm_year + 1900, start_tm.tm_mon + 1, start_tm.tm_mday,
+                     start_tm.tm_hour, start_tm.tm_min, start_tm.tm_sec,
+                     end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday,
+                     end_tm.tm_hour, end_tm.tm_min, end_tm.tm_sec,
+                     index_str.c_str());
+
+            // 用新文件名替换 info 中的路径
+            // Replace paths in info with new filename
+            auto old_name_pos = info.file_path.rfind(info.file_name);
+            if (old_name_pos != std::string::npos) {
+                info.file_path = info.file_path.substr(0, old_name_pos) + new_name;
+            }
+            auto old_url_pos = info.url.rfind(info.file_name);
+            if (old_url_pos != std::string::npos) {
+                info.url = info.url.substr(0, old_url_pos) + new_name;
+            }
+            info.file_name = new_name;
+
             // 临时文件名改成正式文件名，防止mp4未完成时被访问  [AUTO-TRANSLATED:541a6f00]
             // Change the temporary file name to the official file name to prevent access to the mp4 before it is completed
             rename(full_path_tmp.data(), info.file_path.data());
@@ -171,6 +213,95 @@ void MP4Recorder::resetTracks() {
     closeFile();
     _tracks.clear();
     _have_video = false;
+}
+
+// 递归扫描目录中断电或异常退出导致的孤儿临时mp4文件并恢复
+// Recursively scan for orphan temp mp4 files caused by power failure or abnormal exit and recover them
+static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped) {
+    auto pDir = opendir(dir.c_str());
+    if (!pDir) return;
+    while (auto entry = readdir(pDir)) {
+        string name = entry->d_name;
+        if (name == "." || name == "..") continue;
+        string path = dir + "/" + name;
+
+        // 用 lstat 避免跟随符号链接导致环路递归
+        struct stat lst;
+        if (lstat(path.c_str(), &lst) != 0) continue;
+        if (S_ISLNK(lst.st_mode)) continue;
+
+        if (S_ISDIR(lst.st_mode)) {
+            recoverOrphansInDir(path, recovered, skipped);
+            continue;
+        }
+        // 只处理隐藏的 mp4 临时文件
+        if (name[0] != '.' || name.size() <= 5 || name.substr(name.size() - 4) != ".mp4") {
+            continue;
+        }
+
+        auto base = name.substr(1, name.size() - 5); // 去掉前导 '.' 和末尾 '.mp4'
+        if (base.size() < 19) {
+            WarnL << "Orphan file has unexpected name format, deleting: " << path;
+            File::delete_file(path);
+            continue;
+        }
+        struct tm start_tm = {};
+        if (!strptime(base.substr(0, 19).c_str(), "%Y-%m-%d-%H-%M-%S", &start_tm)) {
+            WarnL << "Failed to parse start time from orphan file, deleting: " << path;
+            File::delete_file(path);
+            continue;
+        }
+        auto last_dash = base.rfind('-');
+        string index_str = (last_dash != string::npos && last_dash > 18) ? base.substr(last_dash + 1) : "0";
+
+        try {
+            MP4Demuxer demuxer;
+            demuxer.openMP4(path);
+            auto duration_ms = demuxer.getDurationMS();
+            demuxer.closeMP4();
+
+            time_t start_time = timegm(&start_tm);
+            time_t end_time = start_time + (time_t)(duration_ms / 1000.0);
+
+            struct tm end_tm = {};
+            gmtime_r(&end_time, &end_tm);
+
+            char new_name[128] = {0};
+            snprintf(new_name, sizeof(new_name),
+                     "%04d-%02d-%02d-%02d-%02d-%02d_%04d-%02d-%02d-%02d-%02d-%02d-%s.mp4",
+                     start_tm.tm_year + 1900, start_tm.tm_mon + 1, start_tm.tm_mday,
+                     start_tm.tm_hour, start_tm.tm_min, start_tm.tm_sec,
+                     end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday,
+                     end_tm.tm_hour, end_tm.tm_min, end_tm.tm_sec,
+                     index_str.c_str());
+
+            auto new_path = dir + "/" + new_name;
+            if (0 == ::rename(path.c_str(), new_path.c_str())) {
+                InfoL << "Recovered orphan recording: " << path << " -> " << new_path;
+                ++recovered;
+            } else {
+                WarnL << "Failed to rename orphan recording: " << path << " -> " << new_path;
+            }
+        } catch (std::exception &ex) {
+            // 不删除：可能是权限问题或临时 IO 错误，下次启动可重试
+            WarnL << "Cannot open orphan recording, skipping: " << path << ", error: " << ex.what();
+            ++skipped;
+        }
+    }
+    closedir(pDir);
+}
+
+void MP4Recorder::recoverOrphanRecordings() {
+    GET_CONFIG(string, recordPath, Protocol::kMP4SavePath);
+    if (recordPath.empty()) {
+        return;
+    }
+    auto absPath = File::absolutePath("", recordPath);
+    int recovered = 0, skipped = 0;
+    recoverOrphansInDir(absPath, recovered, skipped);
+    if (recovered > 0 || skipped > 0) {
+        InfoL << "Orphan recording recovery complete: recovered=" << recovered << ", skipped=" << skipped;
+    }
 }
 
 } /* namespace mediakit */

@@ -99,6 +99,11 @@ public:
     void flush() override;
 
     /**
+     * seek后重置编码器内部缓存，避免输出旧时间点残帧
+     */
+    void resetForSeek();
+
+    /**
      * 重置所有track
      * Reset all tracks
      

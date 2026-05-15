@@ -11,6 +11,7 @@
 #ifdef ENABLE_MP4
 
 #include <algorithm>
+#include <ctime>
 #include "MP4Demuxer.h"
 #include "Util/File.h"
 #include "Util/logger.h"
@@ -20,6 +21,36 @@ using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
+
+static uint64_t getDurationFromRecordFileName(const string &file) {
+    auto pos = file.rfind('/');
+    auto name = (pos == string::npos) ? file : file.substr(pos + 1);
+    if (name.size() < 43 || !end_with(name, ".mp4")) {
+        return 0;
+    }
+
+    auto base = name.substr(0, name.size() - 4);
+    auto sep = base.find('_');
+    if (sep == string::npos || sep < 19 || base.size() < sep + 20) {
+        return 0;
+    }
+
+    struct tm start_tm = {};
+    struct tm end_tm = {};
+    if (!strptime(base.substr(0, 19).c_str(), "%Y-%m-%d-%H-%M-%S", &start_tm)) {
+        return 0;
+    }
+    if (!strptime(base.substr(sep + 1, 19).c_str(), "%Y-%m-%d-%H-%M-%S", &end_tm)) {
+        return 0;
+    }
+
+    auto start_sec = timegm(&start_tm);
+    auto end_sec = timegm(&end_tm);
+    if (end_sec <= start_sec) {
+        return 0;
+    }
+    return (uint64_t)(end_sec - start_sec) * 1000;
+}
 
 MP4Demuxer::~MP4Demuxer() {
     closeMP4();
@@ -212,8 +243,19 @@ void MultiMP4Demuxer::openMP4(const string &files_string) {
     for (auto &file : files) {
         auto demuxer = std::make_shared<MP4Demuxer>();
         demuxer->openMP4(file);
+        auto file_duration_ms = demuxer->getDurationMS();
+        if (!file_duration_ms) {
+            file_duration_ms = getDurationFromRecordFileName(file);
+            if (file_duration_ms) {
+                WarnL << "fallback duration from filename for fmp4: " << file << ", duration_ms=" << file_duration_ms;
+            } else {
+                // Keep timeline monotonic to avoid dropping files by duplicate map key.
+                file_duration_ms = 1;
+                WarnL << "invalid mp4 duration, use 1ms fallback: " << file;
+            }
+        }
         _demuxers.emplace(duration_ms, demuxer);
-        duration_ms += demuxer->getDurationMS();
+        duration_ms += file_duration_ms;
     }
     CHECK(!_demuxers.empty());
     _it = _demuxers.begin();

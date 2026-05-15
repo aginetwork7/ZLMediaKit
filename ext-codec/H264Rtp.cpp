@@ -361,6 +361,11 @@ void H264RtpEncoder::flush() {
     }
 }
 
+void H264RtpEncoder::resetForSeek() {
+    // seek后不要发送seek前缓存的最后一帧，否则首包会落在旧时间点。
+    _last_frame = nullptr;
+}
+
 bool H264RtpEncoder::inputFrame_l(const Frame::Ptr &frame, bool is_mark){
     if (frame->keyFrame()) {
         // 保证每一个关键帧前都有SPS与PPS  [AUTO-TRANSLATED:9d1a9d5e]

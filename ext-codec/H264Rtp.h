@@ -93,6 +93,8 @@ public:
      */
     void flush() override;
 
+    void resetForSeek() override;
+
 private:
     void insertConfigFrame(uint64_t pts);
     bool inputFrame_l(const Frame::Ptr &frame, bool is_mark);

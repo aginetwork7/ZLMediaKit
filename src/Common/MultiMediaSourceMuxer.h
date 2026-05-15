@@ -86,6 +86,11 @@ public:
     void setTimeStamp(uint32_t stamp);
 
     /**
+     * 重置平滑发送缓存并重同步时间轴，常用于seek场景
+     */
+    void resetPacedSender(uint32_t stamp);
+
+    /**
      * 重置track
      * Reset track
      

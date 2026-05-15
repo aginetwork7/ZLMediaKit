@@ -94,6 +94,8 @@ public:
      */
     void flush() override;
 
+    void resetForSeek() override;
+
 private:
     void packRtp(const char *ptr, size_t len, uint64_t pts, bool is_mark, bool gop_pos);
     void packRtpFu(const char *ptr, size_t len, uint64_t pts, bool is_mark, bool gop_pos);

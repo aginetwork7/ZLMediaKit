@@ -17,6 +17,7 @@
 #include "Common/Parser.h"
 #include "Common/MultiMediaSourceMuxer.h"
 #include "Record/MP4Reader.h"
+#include "RtspReplay/RtspReplaySourceFactory.h"
 #include "PacketCache.h"
 
 using namespace std;
@@ -384,7 +385,25 @@ static MediaSource::Ptr find_l(const string &schema, const string &vhost_in, con
 
 static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &session, bool retry,
                         const function<void(const MediaSource::Ptr &src)> &cb){
-    auto src = find_l(info.schema, info.vhost, info.app, info.stream, true);
+    bool replay_mode = false;
+    string replay_session_stream;
+    // replay: 仅在 stream id 命中 replay 规则时创建独立会话，避免影响其他业务路径
+    if (retry && RtspReplaySourceFactory::canHandle(info.stream)) {
+#ifdef ENABLE_MP4
+        createReplaySession(info.schema, info.vhost, info.stream, replay_session_stream);
+#endif
+        replay_mode = !replay_session_stream.empty();
+    }
+
+    const string target_app = replay_mode ? "replay" : info.app;
+    const string target_stream = replay_mode ? replay_session_stream : info.stream;
+    const bool target_from_mp4 = !replay_mode;
+
+    auto find_target = [info, target_app, target_stream, target_from_mp4]() -> MediaSource::Ptr {
+        return MediaSource::find(info.schema, info.vhost, target_app, target_stream, target_from_mp4);
+    };
+
+    auto src = find_target();
     if (src || !retry) {
         cb(src);
         return;
@@ -420,25 +439,41 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
         NoticeCenter::Instance().delListener(listener_tag, Broadcast::kBroadcastMediaChanged);
     };
 
+    auto match_target = [info, replay_mode, replay_session_stream](const MediaSource &registered_src) {
+        if (registered_src.getSchema() != info.schema) {
+            return false;
+        }
+        if (replay_mode) {
+            return registered_src.getMediaTuple().stream == replay_session_stream;
+        }
+        return equalMediaTuple(registered_src.getMediaTuple(), info);
+    };
+
+    auto resolve_target_after_register = [info, replay_mode, replay_session_stream, find_target]() -> MediaSource::Ptr {
+        if (replay_mode) {
+            DebugL << "replay: 媒体注册完成,回复播放器:" << replay_session_stream;
+        } else {
+            // 播发器请求的流终于注册上了，切换到自己的线程再回复  [AUTO-TRANSLATED:7b79ad9b]
+            // The stream requested by the player is finally registered, switch to its own thread and reply
+            DebugL << "收到媒体注册事件,回复播放器:" << info.getUrl();
+            // 再找一遍媒体源，一般能找到  [AUTO-TRANSLATED:069de7f6]
+            // Find the media source again, usually it can be found
+        }
+        return find_target();
+    };
+
     weak_ptr<Session> weak_session = session;
-    auto on_register = [weak_session, info, cb_once, cancel_all, poller](BroadcastMediaChangedArgs) {
-        if (!bRegist ||
-            sender.getSchema() != info.schema ||
-            !equalMediaTuple(sender.getMediaTuple(), info)) {
+    auto on_register = [weak_session, cb_once, cancel_all, poller, match_target, resolve_target_after_register](BroadcastMediaChangedArgs) {
+        if (!bRegist || !match_target(sender)) {
             // 不是自己感兴趣的事件，忽略之  [AUTO-TRANSLATED:b4e102d4]
             // Not an event of interest, ignore it
             return;
         }
 
-        poller->async([weak_session, cancel_all, info, cb_once]() {
+        poller->async([weak_session, cancel_all, cb_once, resolve_target_after_register]() {
             cancel_all();
-            if (auto strong_session = weak_session.lock()) {
-                // 播发器请求的流终于注册上了，切换到自己的线程再回复  [AUTO-TRANSLATED:7b79ad9b]
-                // The stream requested by the player is finally registered, switch to its own thread and reply
-                DebugL << "收到媒体注册事件,回复播放器:" << info.getUrl();
-                // 再找一遍媒体源，一般能找到  [AUTO-TRANSLATED:069de7f6]
-                // Find the media source again, usually it can be found
-                findAsync_l(info, strong_session, false, cb_once);
+            if (weak_session.lock()) {
+                cb_once(resolve_target_after_register());
             }
         }, false);
     };
@@ -446,6 +481,15 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
     // 监听媒体注册事件  [AUTO-TRANSLATED:9cf13779]
     // Listen for media registration events
     NoticeCenter::Instance().addListener(listener_tag, Broadcast::kBroadcastMediaChanged, on_register);
+
+    if (replay_mode) {
+        // Close the gap between first find() and listener registration.
+        if (auto ready_src = find_target()) {
+            cancel_all();
+            cb_once(ready_src);
+        }
+        return;
+    }
 
     function<void()> close_player = [cb_once, cancel_all, poller]() {
         poller->async([cancel_all, cb_once]() {

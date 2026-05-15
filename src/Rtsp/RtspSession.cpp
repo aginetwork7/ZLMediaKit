@@ -16,6 +16,7 @@
 #include "Common/config.h"
 #include "UDPServer.h"
 #include "RtspSession.h"
+#include "RtspReplay/RtspReplaySourceFactory.h"
 #include "Util/MD5.h"
 #include "Util/base64.h"
 #include "RtpMultiCaster.h"
@@ -30,6 +31,26 @@ using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
+
+// Global RTSP player session counter for maxSessionCount enforcement
+static std::atomic<int> s_rtsp_player_count{0};
+
+static bool tryIncreaseRtspPlayerCount(int &max_session_count) {
+    GET_CONFIG(int, maxSessionCount, Rtsp::kMaxSessionCount);
+    max_session_count = maxSessionCount;
+    if (maxSessionCount <= 0) {
+        s_rtsp_player_count++;
+        return true;
+    }
+
+    int current = s_rtsp_player_count.load();
+    do {
+        if (current >= maxSessionCount) {
+            return false;
+        }
+    } while (!s_rtsp_player_count.compare_exchange_weak(current, current + 1));
+    return true;
+}
 
 static constexpr uint64_t kRtspAuthFileCheckIntervalMs = 5 * 60 * 1000;
 
@@ -190,6 +211,11 @@ RtspSession::RtspSession(const Socket::Ptr &sock) : Session(sock) {
 }
 
 void RtspSession::onError(const SockException &err) {
+    if (_session_counted) {
+        s_rtsp_player_count--;
+        _session_counted = false;
+    }
+
     bool is_player = !_push_src_ownership;
     uint64_t duration = _alive_ticker.createdTime() / 1000;
     WarnP(this) << (is_player ? "RTSP播放器(" : "RTSP推流器(")
@@ -537,6 +563,7 @@ void RtspSession::handleReq_Describe(const Parser &parser) {
 
 void RtspSession::onAuthSuccess() {
     weak_ptr<RtspSession> weak_self = static_pointer_cast<RtspSession>(shared_from_this());
+    try {
     MediaSource::findAsync(_media_info, weak_self.lock(), [weak_self](const MediaSource::Ptr &src){
         auto strong_self = weak_self.lock();
         if(!strong_self){
@@ -577,6 +604,10 @@ void RtspSession::onAuthSuccess() {
                                       "x-Accept-Dynamic-Rate","1"
                                      },rtsp_src->getSdp());
     });
+    } catch (const ReplayLimitException &) {
+        sendRtspResponse("503 Service Unavailable");
+        shutdown(SockException(Err_shutdown, "replay session limit reached"));
+    }
 }
 
 void RtspSession::onAuthFailed(const string &realm,const string &why,bool close) {
@@ -1106,14 +1137,24 @@ void RtspSession::handleReq_Play(const Parser &parser) {
 
     if (!strRange.empty()) {
         //这是seek操作
-        res_header.emplace("Range", strRange);
         auto strStart = findSubString(strRange.data(), "npt=", "-");
         if (strStart == "now") {
             strStart = "0";
         }
         auto iStartTime = 1000 * (float) atof(strStart.data());
-        use_gop = !play_src->seekTo((uint32_t) iStartTime);
-        InfoP(this) << "rtsp seekTo(ms):" << iStartTime;
+        auto seek_ok = play_src->seekTo((uint32_t) iStartTime);
+        use_gop = !seek_ok;
+        auto actual_ms = play_src->getTimeStamp(TrackInvalid);
+        _seek_probe_req_ms = (uint32_t)iStartTime;
+        _seek_probe_actual_ms = actual_ms;
+        _seek_probe_pending = seek_ok;
+        InfoP(this) << "rtsp seekTo(ms):" << iStartTime
+                    << ", seek_ok:" << seek_ok
+                    << ", actual_ms:" << actual_ms
+                    << ", delta_ms:" << ((int64_t)actual_ms - (int64_t)iStartTime);
+
+        // seek后会重建reader，需要从GOP缓存起播，否则容易错过seek期间已写入的关键帧。
+        use_gop = true;
     }
 
     vector<TrackType> inited_tracks;
@@ -1136,8 +1177,8 @@ void RtspSession::handleReq_Play(const Parser &parser) {
     rtp_info.pop_back();
 
     res_header.emplace("RTP-Info", rtp_info);
-    //已存在Range时不覆盖
-    res_header.emplace("Range", StrPrinter << "npt=" << setiosflags(ios::fixed) << setprecision(2) << play_src->getTimeStamp(TrackInvalid) / 1000.0);
+    //PLAY响应中的Range统一回写为实际播放起点，避免透传请求值导致协议语义不一致
+    res_header["Range"] = StrPrinter << "npt=" << setiosflags(ios::fixed) << setprecision(2) << play_src->getTimeStamp(TrackInvalid) / 1000.0;
     sendRtspResponse("200 OK", res_header);
 
     //设置播放track
@@ -1151,7 +1192,24 @@ void RtspSession::handleReq_Play(const Parser &parser) {
 
     setSocketFlags();
 
+    if (!strRange.empty() && _play_reader && _rtp_type != Rtsp::RTP_MULTICAST) {
+        // seek后重建ring reader，避免旧读游标/缓存导致客户端画面不推进。
+        _play_reader = nullptr;
+    }
+
     if (!_play_reader && _rtp_type != Rtsp::RTP_MULTICAST) {
+        if (!_session_counted) {
+            // Check global RTSP player session limit
+            int maxSessionCount = 0;
+            if (!tryIncreaseRtspPlayerCount(maxSessionCount)) {
+                WarnP(this) << "rtsp player session limit reached: " << maxSessionCount;
+                sendRtspResponse("503 Service Unavailable");
+                shutdown(SockException(Err_shutdown, "max rtsp session count reached"));
+                return;
+            }
+            _session_counted = true;
+        }
+
         weak_ptr<RtspSession> weak_self = static_pointer_cast<RtspSession>(shared_from_this());
         _play_reader = play_src->getRing()->attach(getPoller(), use_gop);
         _play_reader->setGetInfoCB([weak_self]() {
@@ -1538,6 +1596,16 @@ void RtspSession::sendRtpPacket(const RtspMediaSource::RingDataType &pkt) {
             setSendFlushFlag(false);
             pkt->for_each([&](const RtpPacket::Ptr &rtp) {
                 if (_target_play_track == TrackInvalid || _target_play_track == rtp->type) {
+                    if (_seek_probe_pending) {
+                        auto rtp_ms = rtp->getStamp() * uint64_t(1000) / rtp->sample_rate;
+                        InfoP(this) << "rtsp seek probe first RTP(tcp):"
+                                    << " req_ms=" << _seek_probe_req_ms
+                                    << ", actual_ms=" << _seek_probe_actual_ms
+                                    << ", seq=" << rtp->getSeq()
+                                    << ", rtp_ms=" << rtp_ms
+                                    << ", track=" << rtp->type;
+                        _seek_probe_pending = false;
+                    }
                     updateRtcpContext(rtp);
                     send(rtp);
                 }
@@ -1553,6 +1621,16 @@ void RtspSession::sendRtpPacket(const RtspMediaSource::RingDataType &pkt) {
             rtp_socks[TrackAudio] = _rtp_socks[getTrackIndexByTrackType(TrackAudio)];
             pkt->for_each([&](const RtpPacket::Ptr &rtp) {
                 if (_target_play_track == TrackInvalid || _target_play_track == rtp->type) {
+                    if (_seek_probe_pending) {
+                        auto rtp_ms = rtp->getStamp() * uint64_t(1000) / rtp->sample_rate;
+                        InfoP(this) << "rtsp seek probe first RTP(udp):"
+                                    << " req_ms=" << _seek_probe_req_ms
+                                    << ", actual_ms=" << _seek_probe_actual_ms
+                                    << ", seq=" << rtp->getSeq()
+                                    << ", rtp_ms=" << rtp_ms
+                                    << ", track=" << rtp->type;
+                        _seek_probe_pending = false;
+                    }
                     updateRtcpContext(rtp);
                     auto &sock = rtp_socks[rtp->type];
                     if (!sock) {

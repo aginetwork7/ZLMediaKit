@@ -204,6 +204,9 @@ private:
     // 是否已经触发on_play事件  [AUTO-TRANSLATED:49c937ce]
     // Whether the on_play event has been triggered
     bool _emit_on_play = false;
+    // 是否已计入全局播放会话计数
+    // Whether this session has been counted in the global player session counter
+    bool _session_counted = false;
     bool _send_sr_rtcp[2] = {true, true};
     // 断连续推延时  [AUTO-TRANSLATED:13ad578a]
     // Delay in continuous pushing
@@ -273,6 +276,11 @@ private:
     // 统计rtp并发送rtcp  [AUTO-TRANSLATED:0ac2b665]
     // Count RTP and send RTCP
     std::vector<RtcpContext::Ptr> _rtcp_context;
+
+    // seek诊断：用于确认seek后是否真的开始发送新时间点的数据
+    bool _seek_probe_pending = false;
+    uint32_t _seek_probe_req_ms = 0;
+    uint32_t _seek_probe_actual_ms = 0;
 };
 
 /**

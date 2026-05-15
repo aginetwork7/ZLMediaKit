@@ -74,6 +74,15 @@ public:
         return true;
     }
 
+    void clearAndResync(uint64_t dts) {
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
+        _cache.clear();
+        _last_dts[0] = dts;
+        _last_dts[1] = dts;
+        _cache_ms = kMinCacheMS;
+        setCurrentStamp(dts);
+    }
+
 private:
     void onTick() {
         std::lock_guard<std::recursive_mutex> lck(_mtx);
@@ -294,6 +303,12 @@ void MultiMediaSourceMuxer::setTimeStamp(uint32_t stamp) {
     }
     if (_rtsp) {
         _rtsp->setTimeStamp(stamp);
+    }
+}
+
+void MultiMediaSourceMuxer::resetPacedSender(uint32_t stamp) {
+    if (_paced_sender) {
+        _paced_sender->clearAndResync(stamp);
     }
 }
 

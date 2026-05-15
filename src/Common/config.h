@@ -434,6 +434,12 @@ extern const std::string kLowLatency;
 // 迫使客户端重新SETUP并切换到对应协议。目前支持FFMPEG和VLC  [AUTO-TRANSLATED:45f9cddb]
 // Force the client to re-SETUP and switch to the corresponding protocol. Currently supports FFMPEG and VLC
 extern const std::string kRtpTransportType;
+// RTSP最大播放会话数，0为不限制
+// Maximum number of concurrent RTSP player sessions, 0 means unlimited
+extern const std::string kMaxSessionCount;
+// RTSP最大回放会话数，0为不限制
+// Maximum number of concurrent RTSP replay sessions, 0 means unlimited
+extern const std::string kMaxReplaySessionCount;
 } // namespace Rtsp
 
 // //////////RTMP服务器配置///////////  [AUTO-TRANSLATED:8de6f41f]

@@ -162,6 +162,14 @@ void RtspMuxer::flush() {
     }
 }
 
+void RtspMuxer::resetForSeek() {
+    for (auto &pr : _tracks) {
+        if (pr.second.encoder) {
+            pr.second.encoder->resetForSeek();
+        }
+    }
+}
+
 string RtspMuxer::getSdp() {
     return _sdp;
 }

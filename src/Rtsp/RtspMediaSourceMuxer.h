@@ -50,6 +50,11 @@ public:
         _media_src->setTimeStamp(stamp);
     }
 
+    void resetForSeek() {
+        RtspMuxer::resetForSeek();
+        _media_src->clearCache();
+    }
+
     void addTrackCompleted() override {
         RtspMuxer::addTrackCompleted();
         _media_src->setSdp(getSdp());

@@ -230,6 +230,12 @@ bool MP4Reader::seekTo(uint32_t stamp_seek) {
         // Exceeds the file length
         return false;
     }
+
+    if (_muxer) {
+        // seek前先清理并重同步paced sender，避免回退seek后先发旧缓存。
+        _muxer->resetPacedSender(stamp_seek);
+    }
+
     auto stamp = _demuxer->seekTo(stamp_seek);
     if (stamp == -1) {
         // seek失败  [AUTO-TRANSLATED:88cc8444]

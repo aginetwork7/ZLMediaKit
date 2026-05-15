@@ -310,6 +310,9 @@ void MultiMediaSourceMuxer::resetPacedSender(uint32_t stamp) {
     if (_paced_sender) {
         _paced_sender->clearAndResync(stamp);
     }
+    if (_rtsp) {
+        _rtsp->resetForSeek();
+    }
 }
 
 int MultiMediaSourceMuxer::totalReaderCount(MediaSource &sender) {

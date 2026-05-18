@@ -440,6 +440,9 @@ extern const std::string kMaxSessionCount;
 // RTSP最大回放会话数，0为不限制
 // Maximum number of concurrent RTSP replay sessions, 0 means unlimited
 extern const std::string kMaxReplaySessionCount;
+// 回放会话使用的 app 名称，默认 replay
+// App name used by replay sessions, default is replay
+extern const std::string kReplayAppName;
 } // namespace Rtsp
 
 // //////////RTMP服务器配置///////////  [AUTO-TRANSLATED:8de6f41f]

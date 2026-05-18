@@ -395,7 +395,8 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
         replay_mode = !replay_session_stream.empty();
     }
 
-    const string target_app = replay_mode ? "replay" : info.app;
+    GET_CONFIG(string, replay_app, Rtsp::kReplayAppName);
+    const string target_app = replay_mode ? replay_app : info.app;
     const string target_stream = replay_mode ? replay_session_stream : info.stream;
     const bool target_from_mp4 = !replay_mode;
 
@@ -706,9 +707,9 @@ void MediaSourceEvent::onReaderChanged(MediaSource &sender, int size){
     // No one is watching this video source, indicating that the source can be closed.
     GET_CONFIG(string, record_app, Record::kAppName);
     GET_CONFIG(int, stream_none_reader_delay, General::kStreamNoneReaderDelayMS);
-    // 如果mp4点播, 无人观看时我们强制关闭点播  [AUTO-TRANSLATED:9576e4b0]
-    // If it's an mp4 on-demand, we force close the on-demand when no one is watching.
-    bool is_mp4_vod = sender.getMediaTuple().app == record_app;
+    // 如果是点播场景(录制点播或replay), 无人观看时我们强制关闭点播。
+    GET_CONFIG(string, replay_app, Rtsp::kReplayAppName);
+    bool is_vod = sender.getMediaTuple().app == record_app || sender.getMediaTuple().app == replay_app;
     weak_ptr<MediaSource> weak_sender = sender.shared_from_this();
 
     EventPoller::Ptr specified_poller;
@@ -719,7 +720,7 @@ void MediaSourceEvent::onReaderChanged(MediaSource &sender, int size){
         // 尝试获取 OwnerPoller，没有实现则使用默认 nullptr
         // WarnL << ex.what();
     }
-    _async_close_timer = std::make_shared<Timer>(stream_none_reader_delay / 1000.0f, [weak_sender, is_mp4_vod]() {
+    _async_close_timer = std::make_shared<Timer>(stream_none_reader_delay / 1000.0f, [weak_sender, is_vod]() {
         auto strong_sender = weak_sender.lock();
         if (!strong_sender) {
             // 对象已经销毁  [AUTO-TRANSLATED:130328af]
@@ -733,7 +734,7 @@ void MediaSourceEvent::onReaderChanged(MediaSource &sender, int size){
             return false;
         }
 
-        if (!is_mp4_vod) {
+        if (!is_vod) {
             // 直播时触发无人观看事件，让开发者自行选择是否关闭  [AUTO-TRANSLATED:c6c75eaa]
             // When live streaming, trigger the no-viewer event, allowing developers to choose whether to close it.
             NOTICE_EMIT(BroadcastStreamNoneReaderArgs, Broadcast::kBroadcastStreamNoneReader, *strong_sender);
@@ -747,7 +748,7 @@ void MediaSourceEvent::onReaderChanged(MediaSource &sender, int size){
         } else {
             // 这个是mp4点播，我们自动关闭  [AUTO-TRANSLATED:8a7b9a90]
             // This is an mp4 on-demand, we automatically close it.
-            WarnL << "MP4点播无人观看,自动关闭:" << strong_sender->getUrl();
+            WarnL << "点播无人观看,自动关闭:" << strong_sender->getUrl();
             strong_sender->getOwnerPoller()->async([strong_sender]() { strong_sender->close(false); });
         }
         return false;

@@ -252,6 +252,7 @@ const string kLowLatency = RTSP_FIELD"lowLatency";
 const string kRtpTransportType = RTSP_FIELD"rtpTransportType";
 const string kMaxSessionCount = RTSP_FIELD"maxSessionCount";
 const string kMaxReplaySessionCount = RTSP_FIELD"maxReplaySessionCount";
+const string kReplayAppName = RTSP_FIELD"replayAppName";
 
 static onceToken token([]() {
     // 默认Md5方式认证  [AUTO-TRANSLATED:6155d989]
@@ -267,6 +268,7 @@ static onceToken token([]() {
     mINI::Instance()[kRtpTransportType] = -1;
     mINI::Instance()[kMaxSessionCount] = 64;
     mINI::Instance()[kMaxReplaySessionCount] = 16;
+    mINI::Instance()[kReplayAppName] = "replay";
 });
 } // namespace Rtsp
 

@@ -116,7 +116,8 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
         option.enable_hls_fmp4 = false;
         option.max_track = 16;
 
-        MediaTuple tuple = {vhost, "replay", session_stream, ""};
+        GET_CONFIG(string, replay_app, Rtsp::kReplayAppName);
+        MediaTuple tuple = {vhost, replay_app, session_stream, ""};
         auto reader = std::make_shared<RtspReplayReader>(tuple, catalog, option);
         reader->bindTimeline(timeline);
         if (!reader->start(0, true, false)) {

@@ -551,7 +551,8 @@ void RtspSession::onAuthSuccess() {
             return;
         }
         //找到了相应的rtsp流
-        strong_self->_sdp_track = SdpParser(rtsp_src->getSdp()).getAvailableTrack();
+        SdpParser sdp_parser(rtsp_src->getSdp());
+        strong_self->_sdp_track = sdp_parser.getAvailableTrack();
         if (strong_self->_sdp_track.empty()) {
             //该流无效
             WarnL << "sdp中无有效track，该流无效:" << rtsp_src->getSdp();
@@ -559,6 +560,18 @@ void RtspSession::onAuthSuccess() {
             strong_self->shutdown(SockException(Err_shutdown,"can not find any available track in sdp"));
             return;
         }
+
+        auto base_url = strong_self->_content_base;
+        for (auto &track : strong_self->_sdp_track) {
+            auto control = track->_type == TrackVideo ? "video" : "audio";
+            track->_control = base_url + "/" + control;
+            auto range = track->_attr.equal_range("control");
+            if (range.first != range.second) {
+                track->_attr.erase(range.first, range.second);
+            }
+            track->_attr.emplace("control", track->_control);
+        }
+
         strong_self->_rtcp_context.clear();
         for (auto &track : strong_self->_sdp_track) {
             strong_self->_rtcp_context.emplace_back(std::make_shared<RtcpContextForSend>());
@@ -575,7 +588,7 @@ void RtspSession::onAuthSuccess() {
                                      {"Content-Base", strong_self->_content_base + "/",
                                       "x-Accept-Retransmit","our-retransmit",
                                       "x-Accept-Dynamic-Rate","1"
-                                     },rtsp_src->getSdp());
+                                     },sdp_parser.toString());
     });
 }
 

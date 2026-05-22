@@ -1138,14 +1138,24 @@ void RtspSession::handleReq_Play(const Parser &parser) {
 
     bool use_gop = true;
     auto &strScale = parser["Scale"];
+    auto &strSpeed = parser["Speed"];
     auto &strRange = parser["Range"];
     StrCaseMap res_header;
+    string speed_header_name;
+    string speed_value;
     if (!strScale.empty()) {
-        //这是设置播放速度
-        res_header.emplace("Scale", strScale);
-        auto speed = atof(strScale.data());
+        speed_header_name = "Scale";
+        speed_value = strScale;
+    } else if (!strSpeed.empty()) {
+        speed_header_name = "Speed";
+        speed_value = strSpeed;
+    }
+    if (!speed_header_name.empty()) {
+        //播放速度，兼容Scale与Speed两种头
+        auto speed = atof(speed_value.data());
         play_src->speed(speed);
-        InfoP(this) << "rtsp set play speed:" << speed;
+        res_header.emplace(speed_header_name, speed_value);
+        InfoP(this) << "rtsp set play speed via " << speed_header_name << ":" << speed;
     }
 
     if (!strRange.empty()) {

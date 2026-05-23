@@ -12,8 +12,7 @@ env:
 
 jobs:
   build:
-
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
@@ -34,8 +33,9 @@ jobs:
         uses: sigstore/cosign-installer@d572c9c13673d2e0a26fabf90b5748f36886883f
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
-
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
 
       # Workaround: https://github.com/docker/build-push-action/issues/461
       - name: Setup Docker buildx
@@ -48,13 +48,23 @@ jobs:
           username: ${{ secrets.AWS_ACCESS_KEY_ID }}
           password: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
+      - name: Ensure ECR repository exists
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-west-1
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+        run: |
+          aws ecr describe-repositories --repository-names "${IMAGE_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "${IMAGE_NAME}" --region "${AWS_REGION}"
+
       # Extract metadata (tags, labels) for Docker
       # https://github.com/docker/metadata-action
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
         with:
-          images: "${{ vars.IMAGES_REGISTRY }}/zlmediakit"
+          images: "${{ vars.IMAGES_REGISTRY }}/${{ env.IMAGE_NAME }}"
           tags: |
             type=semver,pattern={{version}},value=${{ github.ref_name }}
 
@@ -70,6 +80,12 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: MODEL=Release
+          cache-from: |
+            type=gha,scope=zlm-linux-arm64-release
+            type=registry,ref=${{ vars.IMAGES_REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: |
+            type=gha,scope=zlm-linux-arm64-release,mode=max
+            type=registry,ref=${{ vars.IMAGES_REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
           platforms: linux/arm64
 
       # Sign the resulting Docker image digest except on PRs.

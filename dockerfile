@@ -53,7 +53,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
             -DENABLE_FFMPEG=true \
             -DENABLE_TESTS=false \
             -DENABLE_API=false \
-            -DCMAKE_C_COMPILER_LA UNCHER=ccache \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             .. && \
         cmake --build . --parallel $(nproc)

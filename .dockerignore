@@ -1,0 +1,21 @@
+.git
+.gitignore
+.github/
+.vscode/
+.idea/
+
+build/
+release/
+cmake-build*/
+
+*.log
+*.tmp
+*.swp
+.DS_Store
+
+# Docs and auxiliary files not required for image build
+docs/
+README.md
+README_en.md
+k8s_readme.md
+docker-compose.yaml

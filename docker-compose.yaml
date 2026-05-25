@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   zlmediakit:
-    image: ${IMAGES_REGISTRY}/zlmediakit:${ZLM_IMAGE_TAG:?set ZLM_IMAGE_TAG}
+    image: ${REGISTRY}/zlmediakit:${ZLM_TAG}
     container_name: zlmediakit
     ports:
       - "8089:8089"

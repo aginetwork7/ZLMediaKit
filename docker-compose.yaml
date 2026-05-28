@@ -10,5 +10,5 @@ services:
     volumes:
       - /data/agi7/tinynvr/auth:/opt/media/auth
       - /data/agi7/zlmediakit/log:/opt/media/bin/log
-      - /data/mergefs/pool/data/agi7/zlmediakit/record:/opt/media/bin/www/record
+      - /data/mergefs/pool/data/agi7/zlmediakit/record:/opt/media/bin/www/record:rslave
     restart: unless-stopped

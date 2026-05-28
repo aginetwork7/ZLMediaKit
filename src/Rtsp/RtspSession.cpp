@@ -83,6 +83,7 @@ static bool getFileMTime(const string &path, time_t &mtime) {
 // File format: {"username":"xxx","password":"xxx"}
 static bool loadRtspAuthFile(const string &path, string &username, string &password) {
     if (path.empty()) {
+        WarnL << "rtsp authFile path is empty";
         return false;
     }
 
@@ -105,6 +106,7 @@ static bool loadRtspAuthFile(const string &path, string &username, string &passw
             password = cache.password;
             return true;
         }
+        WarnL << "rtsp authFile stat failed: " << path;
         return false;
     }
 
@@ -122,6 +124,7 @@ static bool loadRtspAuthFile(const string &path, string &username, string &passw
             password = cache.password;
             return true;
         }
+        WarnL << "rtsp authFile open failed: " << path;
         return false;
     }
 
@@ -719,12 +722,15 @@ void RtspSession::onAuthDigest(const string &realm,const string &auth_md5){
     auto username = map["username"];
     auto uri = map["uri"];
     auto response = map["response"];
+    auto qop = map["qop"];
+    auto nc = map["nc"];
+    auto cnonce = map["cnonce"];
     if(username.empty() || uri.empty() || response.empty()){
         onAuthFailed(realm,StrPrinter << "username/uri/response empty:" << username << "," << uri << "," << response);
         return ;
     }
 
-    auto realInvoker = [this,realm,nonce,uri,username,response](bool ignoreAuth,bool encrypted,const string &good_pwd){
+    auto realInvoker = [this,realm,nonce,uri,username,response,qop,nc,cnonce](bool ignoreAuth,bool encrypted,const string &good_pwd){
         if(ignoreAuth){
             //忽略认证
             TraceP(this) << "auth ignored";
@@ -745,7 +751,15 @@ void RtspSession::onAuthDigest(const string &realm,const string &auth_md5){
             encrypted_pwd = MD5(username+ ":" + realm + ":" + good_pwd).hexdigest();
         }
 
-        auto good_response = MD5( encrypted_pwd + ":" + nonce + ":" + MD5(string("DESCRIBE") + ":" + uri).hexdigest()).hexdigest();
+        auto ha2 = MD5(string("DESCRIBE") + ":" + uri).hexdigest();
+        string good_response;
+        if (!qop.empty() && !nc.empty() && !cnonce.empty() && strcasecmp(qop.data(), "auth") == 0) {
+            // RFC2617: qop=auth 时需包含 nc/cnonce/qop 参与摘要计算
+            good_response = MD5(encrypted_pwd + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2).hexdigest();
+        } else {
+            // 兼容未携带 qop 的老客户端
+            good_response = MD5(encrypted_pwd + ":" + nonce + ":" + ha2).hexdigest();
+        }
         if(strcasecmp(good_response.data(),response.data()) == 0){
             //认证成功！md5不区分大小写
             onAuthSuccess();

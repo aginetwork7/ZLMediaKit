@@ -50,6 +50,10 @@ public:
         _media_src->setTimeStamp(stamp);
     }
 
+    void setRtpExtTimeBaseMS(uint64_t base_ms) {
+        RtspMuxer::setRtpExtTimeBaseMS(base_ms);
+    }
+
     void resetForSeek() {
         RtspMuxer::resetForSeek();
         _media_src->clearCache();

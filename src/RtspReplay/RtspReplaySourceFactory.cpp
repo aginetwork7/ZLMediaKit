@@ -12,7 +12,9 @@
 
 #include "RtspReplaySourceFactory.h"
 
+#include "Common/MediaSource.h"
 #include "Common/config.h"
+#include "Thread/WorkThreadPool.h"
 #include "Util/NoticeCenter.h"
 #include "Util/logger.h"
 #include "Util/util.h"
@@ -21,6 +23,7 @@
 #include "RtspReplayTimeline.h"
 
 #include <atomic>
+#include <chrono>
 #include <stdexcept>
 
 using namespace std;
@@ -29,6 +32,13 @@ using namespace toolkit;
 namespace mediakit {
 
 static atomic<int> s_replay_session_count{0};
+
+static void releaseReplaySession(const string &session_stream, void *listener_tag, const std::shared_ptr<std::atomic<bool>> &released) {
+    if (!released->exchange(true)) {
+        s_replay_session_count--;
+    }
+    NoticeCenter::Instance().delListener(listener_tag, Broadcast::kBroadcastMediaChanged);
+}
 
 static bool isDigits(const string &s) {
     if (s.empty()) {
@@ -42,7 +52,7 @@ static bool isDigits(const string &s) {
     return true;
 }
 
-bool RtspReplaySourceFactory::canHandle(const string &stream_id) {
+bool RtspReplaySourceFactory::validateStreamKey(const string &stream_id) {
     auto parts = split(stream_id, "/");
     if (parts.size() != 5) {
         return false;
@@ -82,21 +92,28 @@ void createReplaySession(const string &schema, const string &vhost, const string
 }
 
 void RtspReplaySourceFactory::create(const string &schema, const string &vhost, const string &stream_id, string &out_session_stream) {
+    auto create_begin = std::chrono::steady_clock::now();
+
     out_session_stream.clear();
 
-    if (!canHandle(stream_id)) {
+    if (!validateStreamKey(stream_id)) {
         return;
     }
 
     RtspReplayRequest request;
     try {
+        auto parse_begin = std::chrono::steady_clock::now();
         request = RtspReplayCatalog::parseRequest(schema, vhost, stream_id);
+        auto parse_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - parse_begin).count();
+        DebugL << "replay perf: parse request ms=" << parse_ms << ", stream=" << stream_id;
     } catch (const exception &ex) {
         WarnL << "replay: invalid request: " << stream_id << ", err=" << ex.what();
         return;
     }
 
+    auto build_begin = std::chrono::steady_clock::now();
     auto catalog = RtspReplayCatalog::build(request);
+    auto build_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - build_begin).count();
     if (catalog.segments.empty()) {
         WarnL << "replay: no recording files found for: " << stream_id;
         return;
@@ -118,7 +135,9 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
 
         GET_CONFIG(string, replay_app, Rtsp::kReplayAppName);
         MediaTuple tuple = {vhost, replay_app, session_stream, ""};
+        auto reader_setup_begin = std::chrono::steady_clock::now();
         auto reader = std::make_shared<RtspReplayReader>(tuple, catalog, option);
+        auto reader_setup_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - reader_setup_begin).count();
         reader->bindTimeline(timeline);
         if (!reader->start(0, true, false)) {
             throw std::runtime_error("failed to start replay reader");
@@ -128,19 +147,36 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
         auto released = std::make_shared<std::atomic<bool>>(false);
         NoticeCenter::Instance().addListener(listener_tag, Broadcast::kBroadcastMediaChanged, [session_stream, listener_tag, released](BroadcastMediaChangedArgs) {
             if (!bRegist && sender.getMediaTuple().stream == session_stream) {
-                if (!released->exchange(true)) {
-                    s_replay_session_count--;
-                }
-                NoticeCenter::Instance().delListener(listener_tag, Broadcast::kBroadcastMediaChanged);
+                releaseReplaySession(session_stream, listener_tag, released);
             }
         });
 
+        GET_CONFIG(int, max_wait_ms, General::kMaxStreamWaitTimeMS);
+        auto cleanup_delay_ms = max_wait_ms + 5000;
+        auto replay_app_name = replay_app;
+        WorkThreadPool::Instance().getPoller()->doDelayTask(cleanup_delay_ms, [schema, vhost, replay_app_name, session_stream, listener_tag, released]() {
+            auto src = MediaSource::find(schema, vhost, replay_app_name, session_stream, false);
+            if (src) {
+                // Source is registered and still active.
+                return 0;
+            }
+            WarnL << "replay: cleanup inactive prepared session, stream=" << session_stream;
+            releaseReplaySession(session_stream, listener_tag, released);
+            return 0;
+        });
+
         out_session_stream = session_stream;
-        InfoL << "replay: session starting, stream=" << session_stream
+        auto create_total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - create_begin).count();
+        InfoL << "replay perf: create stream=" << session_stream
+              << ", total_ms=" << create_total_ms
+              << ", catalog_build_ms=" << build_ms
+              << ", reader_setup_ms=" << reader_setup_ms
+              << ", files=" << catalog.segments.size();
+        InfoL << "replay: session started, stream=" << session_stream
               << ", files=" << catalog.segments.size();
     } catch (const ReplayLimitException &) {
         throw;
-    } catch (const exception &ex) {
+    } catch (const std::exception &ex) {
         if (counted) {
             s_replay_session_count--;
         }

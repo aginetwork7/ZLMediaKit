@@ -25,7 +25,7 @@ public:
 class RtspReplaySourceFactory {
 public:
     // 轻量判定请求是否可能是 replay stream id，避免无关业务进入创建流程
-    static bool canHandle(const std::string &stream_id);
+    static bool validateStreamKey(const std::string &stream_id);
     static void create(const std::string &schema, const std::string &vhost, const std::string &stream_id, std::string &out_session_stream);
 };
 

@@ -306,6 +306,12 @@ void MultiMediaSourceMuxer::setTimeStamp(uint32_t stamp) {
     }
 }
 
+void MultiMediaSourceMuxer::setRtpExtTimeBaseMS(uint64_t base_ms) {
+    if (_rtsp) {
+        _rtsp->setRtpExtTimeBaseMS(base_ms);
+    }
+}
+
 void MultiMediaSourceMuxer::resetPacedSender(uint32_t stamp) {
     if (_paced_sender) {
         _paced_sender->clearAndResync(stamp);

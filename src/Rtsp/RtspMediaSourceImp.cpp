@@ -54,11 +54,16 @@ void RtspMediaSource::onWrite(RtpPacket::Ptr rtp, bool keyPos) {
     assert(rtp->type >= 0 && rtp->type < TrackMax);
     auto &track = _tracks[rtp->type];
     auto stamp = rtp->getStampMS();
+    auto track_stamp = rtp->getStamp() * uint64_t(1000) / rtp->sample_rate;
+    if (rtp->ntp_stamp > 0 && rtp->ntp_stamp <= UINT32_MAX) {
+        // replay场景会把会话NPT(ms)放在ntp_stamp中，优先使用以避免32位RTP时间戳回绕。
+        track_stamp = rtp->ntp_stamp;
+    }
     bool is_video = rtp->type == TrackVideo;
     // 音频总是更新，视频在关键包时更新
     if (track && ((keyPos && _have_video && is_video) || (!is_video))) {
         track->_seq = rtp->getSeq();
-        track->_time_stamp = rtp->getStamp() * uint64_t(1000) / rtp->sample_rate;
+        track->_time_stamp = track_stamp;
         track->_ssrc = rtp->getSSRC();
     }
     if (!_ring) {

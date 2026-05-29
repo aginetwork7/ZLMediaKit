@@ -46,10 +46,14 @@ private:
     void setup(const MediaTuple &tuple, const RtspReplayCatalogResult &catalog, const ProtocolOption &option, toolkit::EventPoller::Ptr poller);
     bool readSample();
     bool readNextSample();
+    bool openSegmentByDemuxStamp(uint32_t target_demux_ms);
+    bool openSegmentByIndex(size_t segment_index, uint64_t local_seek_ms);
+    size_t locateSegmentByAbsolute(uint64_t abs_ms) const;
+    Frame::Ptr readFrameWithSegmentSwitch(bool &keyFrame, bool &eof);
 
     uint32_t getCurrentDemuxStamp() const;
     void setCurrentDemuxStamp(uint32_t stamp, bool sync_timeline);
-    bool seekToDemux(uint32_t stamp_seek, bool allow_tail_fallback);
+    bool seekToDemux(uint32_t stamp_seek, bool allow_tail_fallback, bool reopen_demux = true);
 
     uint32_t absoluteToDemux(uint64_t abs_ms) const;
     uint64_t demuxToAbsolute(uint32_t demux_ms) const;
@@ -69,6 +73,9 @@ private:
     uint64_t _window_begin_demux_ms = 0;
     uint64_t _window_end_demux_ms = 0;
     uint64_t _session_origin_demux_ms = 0;
+    uint64_t _active_segment_begin_demux_ms = 0;
+    uint64_t _active_segment_end_demux_ms = 0;
+    size_t _active_segment_index = 0;
 
     std::string _file_list;
     std::string _origin_url;
@@ -80,7 +87,7 @@ private:
     toolkit::Ticker _seek_ticker;
     toolkit::Timer::Ptr _timer;
 
-    MultiMP4Demuxer::Ptr _demuxer;
+    MP4Demuxer::Ptr _demuxer;
     MultiMediaSourceMuxer::Ptr _muxer;
     toolkit::EventPoller::Ptr _poller;
 };

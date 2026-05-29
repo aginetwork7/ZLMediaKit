@@ -26,9 +26,8 @@ void RtspReplayTimeline::setSessionOrigin(uint64_t actual_at_ms) {
     if (_started) {
         throw std::runtime_error("replay session origin already set");
     }
-    auto clamped = clampToWindow(actual_at_ms);
-    _session_origin_at_ms = clamped;
-    _current_at_ms = clamped;
+    _session_origin_at_ms = _window_begin_at_ms;
+    _current_at_ms = clampToWindow(actual_at_ms);
     _started = true;
 }
 
@@ -65,7 +64,7 @@ uint64_t RtspReplayTimeline::resolvePlayTargetFromNpt(uint32_t npt_ms) const {
     if (!_started) {
         throw std::runtime_error("replay timeline not started");
     }
-    auto target = _session_origin_at_ms + npt_ms;
+    auto target = _window_begin_at_ms + npt_ms;
     return clampToWindow(target);
 }
 
@@ -81,7 +80,7 @@ uint64_t RtspReplayTimeline::clampToWindow(uint64_t abs_ms) const {
 }
 
 uint64_t RtspReplayTimeline::sessionOriginAt() const {
-    return _session_origin_at_ms;
+    return _window_begin_at_ms;
 }
 
 uint64_t RtspReplayTimeline::currentAt() const {
@@ -89,10 +88,10 @@ uint64_t RtspReplayTimeline::currentAt() const {
 }
 
 uint32_t RtspReplayTimeline::currentNptMs() const {
-    if (!_started || _current_at_ms < _session_origin_at_ms) {
+    if (!_started || _current_at_ms < _window_begin_at_ms) {
         return 0;
     }
-    auto delta = _current_at_ms - _session_origin_at_ms;
+    auto delta = _current_at_ms - _window_begin_at_ms;
     if (delta > std::numeric_limits<uint32_t>::max()) {
         return std::numeric_limits<uint32_t>::max();
     }

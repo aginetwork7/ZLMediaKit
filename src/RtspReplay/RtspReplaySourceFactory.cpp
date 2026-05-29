@@ -31,13 +31,10 @@ using namespace toolkit;
 
 namespace mediakit {
 
-static atomic<int> s_replay_session_count{0};
-
 static void releaseReplaySession(const string &session_stream, void *listener_tag, const std::shared_ptr<std::atomic<bool>> &released) {
     if (!released->exchange(true)) {
-        s_replay_session_count--;
+        NoticeCenter::Instance().delListener(listener_tag, Broadcast::kBroadcastMediaChanged);
     }
-    NoticeCenter::Instance().delListener(listener_tag, Broadcast::kBroadcastMediaChanged);
 }
 
 static bool isDigits(const string &s) {
@@ -72,27 +69,13 @@ bool RtspReplaySourceFactory::validateStreamKey(const string &stream_id) {
     return true;
 }
 
-static void increaseReplaySessionCountOrThrow() {
-    GET_CONFIG(int, maxReplaySessions, Rtsp::kMaxReplaySessionCount);
-    if (maxReplaySessions <= 0) {
-        s_replay_session_count++;
-        return;
-    }
-
-    int current = s_replay_session_count.load();
-    do {
-        if (current >= maxReplaySessions) {
-            throw ReplayLimitException("replay session limit reached");
-        }
-    } while (!s_replay_session_count.compare_exchange_weak(current, current + 1));
-}
-
 void createReplaySession(const string &schema, const string &vhost, const string &stream_id, string &out_session_stream) {
     RtspReplaySourceFactory::create(schema, vhost, stream_id, out_session_stream);
 }
 
 void RtspReplaySourceFactory::create(const string &schema, const string &vhost, const string &stream_id, string &out_session_stream) {
     auto create_begin = std::chrono::steady_clock::now();
+    int64_t parse_ms = 0;
 
     out_session_stream.clear();
 
@@ -104,8 +87,7 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
     try {
         auto parse_begin = std::chrono::steady_clock::now();
         request = RtspReplayCatalog::parseRequest(schema, vhost, stream_id);
-        auto parse_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - parse_begin).count();
-        DebugL << "replay perf: parse request ms=" << parse_ms << ", stream=" << stream_id;
+        parse_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - parse_begin).count();
     } catch (const exception &ex) {
         WarnL << "replay: invalid request: " << stream_id << ", err=" << ex.what();
         return;
@@ -119,11 +101,7 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
         return;
     }
 
-    bool counted = false;
     try {
-        increaseReplaySessionCountOrThrow();
-        counted = true;
-
         auto session_stream = request.deviceId + "/" + request.channelId + "/" + request.streamType + "/sid_" + makeRandStr(8);
         auto timeline = std::make_shared<RtspReplayTimeline>(request.windowBeginAtMs, request.windowEndAtMs);
 
@@ -142,6 +120,7 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
         if (!reader->start(0, true, false)) {
             throw std::runtime_error("failed to start replay reader");
         }
+        const auto &reader_perf = reader->getPerfStats();
 
         auto listener_tag = reader.get();
         auto released = std::make_shared<std::atomic<bool>>(false);
@@ -169,17 +148,17 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
         auto create_total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - create_begin).count();
         InfoL << "replay perf: create stream=" << session_stream
               << ", total_ms=" << create_total_ms
+              << ", parse_ms=" << parse_ms
               << ", catalog_build_ms=" << build_ms
               << ", reader_setup_ms=" << reader_setup_ms
-              << ", files=" << catalog.segments.size();
+              << ", probe_open_ms=" << reader_perf.setup_probe_open_ms
+              << ", start_total_ms=" << reader_perf.start_total_ms
+              << ", demux_open_ms=" << reader_perf.demux_open_ms
+              << ", prime_track_ms=" << reader_perf.prime_track_ms
+              << ", seek_ms=" << reader_perf.seek_ms;
         InfoL << "replay: session started, stream=" << session_stream
-              << ", files=" << catalog.segments.size();
-    } catch (const ReplayLimitException &) {
-        throw;
+              << ", files count=" << catalog.segments.size();
     } catch (const std::exception &ex) {
-        if (counted) {
-            s_replay_session_count--;
-        }
         WarnL << "replay: failed to create session: " << ex.what();
     }
 }

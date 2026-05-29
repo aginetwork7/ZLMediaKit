@@ -13,6 +13,8 @@
 
 #ifdef ENABLE_MP4
 
+#include <cstdint>
+
 #include "RtspReplayTypes.h"
 #include "RtspReplayTimeline.h"
 #include "Record/MP4Demuxer.h"
@@ -24,11 +26,20 @@ class RtspReplayReader : public std::enable_shared_from_this<RtspReplayReader>, 
 public:
     using Ptr = std::shared_ptr<RtspReplayReader>;
 
+    struct PerfStats {
+        int64_t setup_probe_open_ms = 0;
+        int64_t start_total_ms = 0;
+        int64_t demux_open_ms = 0;
+        int64_t prime_track_ms = 0;
+        int64_t seek_ms = 0;
+    };
+
     RtspReplayReader(const MediaTuple &tuple, const RtspReplayCatalogResult &catalog, const ProtocolOption &option, toolkit::EventPoller::Ptr poller = nullptr);
 
     void bindTimeline(const std::shared_ptr<RtspReplayTimeline> &timeline);
     bool start(uint64_t sample_ms = 0, bool ref_self = true, bool file_repeat = false);
     void stop();
+    const PerfStats &getPerfStats() const;
 
     uint64_t firstPlayableAt() const;
     uint64_t currentAt() const;
@@ -90,6 +101,7 @@ private:
     MP4Demuxer::Ptr _demuxer;
     MultiMediaSourceMuxer::Ptr _muxer;
     toolkit::EventPoller::Ptr _poller;
+    PerfStats _perf_stats;
 };
 
 } // namespace mediakit

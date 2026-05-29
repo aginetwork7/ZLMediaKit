@@ -74,7 +74,10 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
     auto probe_demuxer = std::make_shared<MP4Demuxer>();
     auto probe_open_begin = std::chrono::steady_clock::now();
     probe_demuxer->openMP4(probe_segment.filePath);
-   
+    _perf_stats.setup_probe_open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - probe_open_begin)
+            .count();
+
     auto tracks = probe_demuxer->getTracks(false);
     if (tracks.empty()) {
         throw std::runtime_error("invalid replay tracks");
@@ -149,12 +152,10 @@ bool RtspReplayReader::start(uint64_t sample_ms, bool ref_self, bool file_repeat
     }
 
     auto start_total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_begin).count();
-    auto stream_url = _muxer ? _muxer->getMediaTuple().shortUrl() : _origin_url;
-    InfoL << "replay perf: start stream=" << stream_url
-          << ", total_ms=" << start_total_ms
-          << ", demux_open_ms=" << demux_open_ms
-          << ", prime_track_ms=" << prime_track_ms
-          << ", seek_ms=" << seek_ms;
+    _perf_stats.start_total_ms = start_total_ms;
+    _perf_stats.demux_open_ms = demux_open_ms;
+    _perf_stats.prime_track_ms = prime_track_ms;
+    _perf_stats.seek_ms = seek_ms;
 
     _file_repeat = file_repeat;
     auto timer_sec = (sample_ms ? sample_ms : sampleMS) / 1000.0f;
@@ -180,6 +181,10 @@ bool RtspReplayReader::start(uint64_t sample_ms, bool ref_self, bool file_repeat
 void RtspReplayReader::stop() {
     lock_guard<recursive_mutex> lck(_mtx);
     _timer = nullptr;
+}
+
+const RtspReplayReader::PerfStats &RtspReplayReader::getPerfStats() const {
+    return _perf_stats;
 }
 
 uint64_t RtspReplayReader::firstPlayableAt() const {

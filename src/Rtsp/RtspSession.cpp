@@ -8,7 +8,6 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
-#include <atomic>
 #include <chrono>
 #include <fstream>
 #include <iomanip>
@@ -31,26 +30,6 @@ using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
-
-// Global RTSP player session counter for maxSessionCount enforcement
-static std::atomic<int> s_rtsp_player_count{0};
-
-static bool tryIncreaseRtspPlayerCount(int &max_session_count) {
-    GET_CONFIG(int, maxSessionCount, Rtsp::kMaxSessionCount);
-    max_session_count = maxSessionCount;
-    if (maxSessionCount <= 0) {
-        s_rtsp_player_count++;
-        return true;
-    }
-
-    int current = s_rtsp_player_count.load();
-    do {
-        if (current >= maxSessionCount) {
-            return false;
-        }
-    } while (!s_rtsp_player_count.compare_exchange_weak(current, current + 1));
-    return true;
-}
 
 static constexpr uint64_t kRtspAuthFileCheckIntervalMs = 5 * 60 * 1000;
 
@@ -214,11 +193,6 @@ RtspSession::RtspSession(const Socket::Ptr &sock) : Session(sock) {
 }
 
 void RtspSession::onError(const SockException &err) {
-    if (_session_counted) {
-        s_rtsp_player_count--;
-        _session_counted = false;
-    }
-
     bool is_player = !_push_src_ownership;
     uint64_t duration = _alive_ticker.createdTime() / 1000;
     WarnP(this) << (is_player ? "RTSP播放器(" : "RTSP推流器(")
@@ -566,7 +540,6 @@ void RtspSession::handleReq_Describe(const Parser &parser) {
 
 void RtspSession::onAuthSuccess() {
     weak_ptr<RtspSession> weak_self = static_pointer_cast<RtspSession>(shared_from_this());
-    try {
     MediaSource::findAsync(_media_info, weak_self.lock(), [weak_self](const MediaSource::Ptr &src){
         auto strong_self = weak_self.lock();
         if(!strong_self){
@@ -620,10 +593,6 @@ void RtspSession::onAuthSuccess() {
                                       "x-Accept-Dynamic-Rate","1"
                                      },sdp_parser.toString());
     });
-    } catch (const ReplayLimitException &) {
-        sendRtspResponse("503 Service Unavailable");
-        shutdown(SockException(Err_shutdown, "replay session limit reached"));
-    }
 }
 
 void RtspSession::onAuthFailed(const string &realm,const string &why,bool close) {
@@ -1235,18 +1204,6 @@ void RtspSession::handleReq_Play(const Parser &parser) {
     }
 
     if (!_play_reader && _rtp_type != Rtsp::RTP_MULTICAST) {
-        if (!_session_counted) {
-            // Check global RTSP player session limit
-            int maxSessionCount = 0;
-            if (!tryIncreaseRtspPlayerCount(maxSessionCount)) {
-                WarnP(this) << "rtsp player session limit reached: " << maxSessionCount;
-                sendRtspResponse("503 Service Unavailable");
-                shutdown(SockException(Err_shutdown, "max rtsp session count reached"));
-                return;
-            }
-            _session_counted = true;
-        }
-
         weak_ptr<RtspSession> weak_self = static_pointer_cast<RtspSession>(shared_from_this());
         _play_reader = play_src->getRing()->attach(getPoller(), use_gop);
         _play_reader->setGetInfoCB([weak_self]() {

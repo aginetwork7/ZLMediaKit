@@ -130,12 +130,6 @@ bool RtspReplayReader::start(uint64_t sample_ms, bool ref_self, bool file_repeat
         _muxer->setMediaListener(strong_self);
     }
 
-    auto seek_begin = std::chrono::steady_clock::now();
-    if (!seekToDemux((uint32_t)_window_begin_demux_ms, true, false)) {
-        return false;
-    }
-    seek_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - seek_begin).count();
-
     auto actual_at = demuxToAbsolute(getCurrentDemuxStamp());
     auto ext_base_ms = demuxToAbsolute((uint32_t)_window_begin_demux_ms);
     if (_timeline) {

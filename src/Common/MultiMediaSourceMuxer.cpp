@@ -668,7 +668,7 @@ EventPoller::Ptr MultiMediaSourceMuxer::getOwnerPoller(MediaSource &sender) {
     try {
         auto ret = listener->getOwnerPoller(sender);
         if (ret != _poller) {
-            WarnL << "OwnerPoller changed " << _poller->getThreadName() << " -> " << ret->getThreadName() << " : " << shortUrl();
+            WarnL << "OwnerPoller changed " << _poller->getThreadName() << " -> " << ret->getThreadName() /*<< " : " << shortUrl()*/;
             _poller = ret;
             if (_paced_sender) {
                 _paced_sender->resetTimer(_poller);

@@ -268,10 +268,10 @@ void RtspMuxer::flush() {
     }
 }
 
-void RtspMuxer::resetForSeek() {
+void RtspMuxer::dropCachedFrame() {
     for (auto &pr : _tracks) {
         if (pr.second.encoder) {
-            pr.second.encoder->resetForSeek();
+            pr.second.encoder->dropCachedFrame();
         }
     }
 }

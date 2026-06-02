@@ -93,8 +93,9 @@ public:
      * [AUTO-TRANSLATED:adaea568]
      */
     void flush() override;
-
-    void resetForSeek() override;
+    
+    // 时间轴发生跳变后调用，用于丢弃编码器内部缓存的上一帧，避免输出旧时间点残帧。
+    void dropCachedFrame() override;
 
 private:
     void packRtp(const char *ptr, size_t len, uint64_t pts, bool is_mark, bool gop_pos);

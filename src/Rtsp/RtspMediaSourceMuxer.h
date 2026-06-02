@@ -54,8 +54,8 @@ public:
         RtspMuxer::setRtpExtTimeBaseMS(base_ms);
     }
 
-    void resetForSeek() {
-        RtspMuxer::resetForSeek();
+    void dropCachedFrame() {
+        RtspMuxer::dropCachedFrame();
         _media_src->clearCache();
     }
 

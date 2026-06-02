@@ -392,8 +392,7 @@ void H265RtpEncoder::flush() {
     }
 }
 
-void H265RtpEncoder::resetForSeek() {
-    // seek后不要发送seek前缓存的最后一帧，否则首包会落在旧时间点。
+void H265RtpEncoder::dropCachedFrame() {
     _last_frame = nullptr;
 }
 

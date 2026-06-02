@@ -105,7 +105,7 @@ public:
     /**
      * seek后重置编码器内部缓存，避免输出旧时间点残帧
      */
-    void resetForSeek();
+    void dropCachedFrame();
 
     /**
      * 重置所有track

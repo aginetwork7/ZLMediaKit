@@ -317,7 +317,7 @@ void MultiMediaSourceMuxer::resetPacedSender(uint32_t stamp) {
         _paced_sender->clearAndResync(stamp);
     }
     if (_rtsp) {
-        _rtsp->resetForSeek();
+        _rtsp->dropCachedFrame();
     }
 }
 

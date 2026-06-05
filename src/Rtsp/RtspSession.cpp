@@ -15,7 +15,6 @@
 #include "Common/config.h"
 #include "UDPServer.h"
 #include "RtspSession.h"
-#include "RtspReplay/RtspReplaySourceFactory.h"
 #include "Util/MD5.h"
 #include "Util/base64.h"
 #include "RtpMultiCaster.h"

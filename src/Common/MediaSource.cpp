@@ -387,13 +387,13 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
                         const function<void(const MediaSource::Ptr &src)> &cb){
     bool replay_mode = false;
     string replay_session_stream;
+#ifdef ENABLE_MP4
     // replay: 仅在 stream id 命中 replay 规则时创建独立会话，避免影响其他业务路径
     if (retry && RtspReplaySourceFactory::validateStreamKey(info.stream)) {
-#ifdef ENABLE_MP4
         createReplaySession(info.schema, info.vhost, info.stream, replay_session_stream);
-#endif
         replay_mode = !replay_session_stream.empty();
     }
+#endif
 
     GET_CONFIG(string, replay_app, Rtsp::kReplayAppName);
     const string target_app = replay_mode ? replay_app : info.app;

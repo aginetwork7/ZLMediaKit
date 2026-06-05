@@ -89,9 +89,14 @@ public:
     void setRtpExtTimeBaseMS(uint64_t base_ms);
 
     /**
-     * 重置平滑发送缓存并重同步时间轴，常用于seek场景
+     * 重置平滑发送缓存并重同步时间轴
      */
     void resetPacedSender(uint32_t stamp);
+
+    /**
+     * 设置平滑发送的播放速率，用于回放变速
+     */
+    void setSpeed(float speed);
 
     /**
      * 重置track

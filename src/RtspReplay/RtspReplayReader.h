@@ -16,7 +16,6 @@
 #include <cstdint>
 
 #include "RtspReplayTypes.h"
-#include "RtspReplayTimeline.h"
 #include "Record/MP4Demuxer.h"
 #include "Common/MultiMediaSourceMuxer.h"
 
@@ -27,16 +26,14 @@ public:
     using Ptr = std::shared_ptr<RtspReplayReader>;
 
     struct PerfStats {
-        int64_t setup_probe_open_ms = 0;
-        int64_t start_total_ms = 0;
-        int64_t demux_open_ms = 0;
-        int64_t prime_track_ms = 0;
-        int64_t seek_ms = 0;
+        int64_t _setupProbeOpenMs = 0;
+        int64_t _startTotalMs = 0;
+        int64_t _demuxOpenMs = 0;
+        int64_t _primeTrackMs = 0;
     };
 
     RtspReplayReader(const MediaTuple &tuple, const RtspReplayCatalogResult &catalog, const ProtocolOption &option, toolkit::EventPoller::Ptr poller = nullptr);
 
-    void bindTimeline(const std::shared_ptr<RtspReplayTimeline> &timeline);
     bool start(uint64_t sample_ms = 0, bool ref_self = true, bool file_repeat = false);
     void stop();
     const PerfStats &getPerfStats() const;
@@ -57,42 +54,50 @@ private:
     void setup(const MediaTuple &tuple, const RtspReplayCatalogResult &catalog, const ProtocolOption &option, toolkit::EventPoller::Ptr poller);
     bool readSample();
     bool readNextSample();
-    bool openSegmentByDemuxStamp(uint32_t target_demux_ms);
+    bool openSegmentByOffset(uint32_t target_offset_ms);
     bool openSegmentByIndex(size_t segment_index, uint64_t local_seek_ms);
     size_t locateSegmentByAbsolute(uint64_t abs_ms) const;
     Frame::Ptr readFrameWithSegmentSwitch(bool &keyFrame, bool &eof);
 
-    uint32_t getCurrentDemuxStamp() const;
-    void setCurrentDemuxStamp(uint32_t stamp, bool sync_timeline);
-    bool seekToDemux(uint32_t stamp_seek, bool allow_tail_fallback, bool reopen_demux = true);
+    uint32_t getCurrentOffset() const;
+    void setCurrentOffset(uint32_t offset_ms, bool sync_timeline);
+    bool seekToOffset(uint32_t offset_seek_ms, bool allow_tail_fallback, bool reopen_demux = true);
 
-    uint32_t absoluteToDemux(uint64_t abs_ms) const;
-    uint64_t demuxToAbsolute(uint32_t demux_ms) const;
+    uint32_t absoluteToOffset(uint64_t abs_ms) const;
+    uint64_t offsetToAbsolute(uint32_t offset_ms) const;
     Frame::Ptr remapFrameToSessionNpt(const Frame::Ptr &frame) const;
+
+    uint64_t clampToWindow(uint64_t abs_ms) const;
+    void onStarted(uint64_t actual_at_ms);
+    void onProgressed(uint64_t actual_at_ms);
+    void onSeekCompleted(uint64_t actual_at_ms);
+    uint64_t resolvePlayTargetFromNpt(uint32_t npt_ms) const;
+    uint32_t currentNptMs() const;
 
 private:
     bool _file_repeat = false;
     bool _have_video = false;
     bool _paused = false;
-    bool _timeline_started = false;
+    bool _started = false;
     float _speed = 1.0f;
 
     uint32_t _last_dts = 0;
     uint32_t _seek_to = 0;
 
     uint64_t _base_file_begin_at_ms = 0;
-    uint64_t _window_begin_demux_ms = 0;
-    uint64_t _window_end_demux_ms = 0;
-    uint64_t _session_origin_demux_ms = 0;
-    uint64_t _active_segment_begin_demux_ms = 0;
-    uint64_t _active_segment_end_demux_ms = 0;
+    uint64_t _window_begin_at_ms = 0;
+    uint64_t _window_end_at_ms = 0;
+    uint64_t _window_begin_offset_ms = 0; // window_begin offset relative to the file start time 
+    uint64_t _window_end_offset_ms = 0; // window_end offset relative to the file start time
+    uint64_t _current_at_ms = 0;
+    uint64_t _session_origin_offset_ms = 0;
+    uint64_t _active_segment_begin_offset_ms = 0;
+    uint64_t _active_segment_end_offset_ms = 0;
     size_t _active_segment_index = 0;
 
-    std::string _file_list;
     std::string _origin_url;
 
     RtspReplayCatalogResult _catalog;
-    std::shared_ptr<RtspReplayTimeline> _timeline;
 
     std::recursive_mutex _mtx;
     toolkit::Ticker _seek_ticker;

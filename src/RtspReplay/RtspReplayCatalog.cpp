@@ -68,8 +68,8 @@ static string epochToDateStr(time_t sec) {
     return buf;
 }
 
-RtspReplayRequest RtspReplayCatalog::parseRequest(const string &schema, const string &vhost, const string &stream_id) {
-    auto parts = split(stream_id, "/");
+RtspReplayRequest RtspReplayCatalog::parseRequest(const string &schema, const string &vhost, const string &streamId) {
+    auto parts = split(streamId, "/");
     if (parts.size() != 5) {
         throw invalid_argument("invalid replay stream id");
     }
@@ -104,60 +104,61 @@ RtspReplayRequest RtspReplayCatalog::parseRequest(const string &schema, const st
     }
 
     RtspReplayRequest request;
-    request.schema = schema;
-    request.vhost = vhost;
-    request.deviceId = parts[0];
-    request.channelId = parts[1];
-    request.streamType = parts[2];
-    request.windowBeginAtMs = begin_ms;
-    request.windowEndAtMs = end_ms;
+    request._schema = schema;
+    request._vhost = vhost;
+    request._deviceId = parts[0];
+    request._channelId = parts[1];
+    request._streamType = parts[2];
+    request._windowBeginAtMs = begin_ms;
+    request._windowEndAtMs = end_ms;
     return request;
 }
 
 RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &request) {
     RtspReplayCatalogResult ret;
-    ret.windowBeginAtMs = request.windowBeginAtMs;
-    ret.windowEndAtMs = request.windowEndAtMs;
+    ret._windowBeginAtMs = request._windowBeginAtMs;
+    ret._windowEndAtMs = request._windowEndAtMs;
 
     GET_CONFIG(string, recordPath, Protocol::kMP4SavePath);
     GET_CONFIG(string, recordAppName, Record::kAppName);
     GET_CONFIG(bool, enableVhost, General::kEnableVhost);
 
-    const string live_app = "live";
-    string rel_path;
+    const string liveApp = "live";
+    string relativePath;
     if (enableVhost) {
-        rel_path = request.vhost + "/" + recordAppName + "/" + live_app + "/" + request.deviceId + "/" + request.channelId + "/" + request.streamType;
+        relativePath = request._vhost + "/" + recordAppName + "/" + liveApp + "/" + request._deviceId + "/" + request._channelId + "/" + request._streamType;
     } else {
-        rel_path = recordAppName + "/" + live_app + "/" + request.deviceId + "/" + request.channelId + "/" + request.streamType;
+        relativePath = recordAppName + "/" + liveApp + "/" + request._deviceId + "/" + request._channelId + "/" + request._streamType;
     }
-    auto record_dir = File::absolutePath(rel_path, recordPath);
+    auto recordDir = File::absolutePath(relativePath, recordPath);
 
-    auto begin_sec = (time_t)(request.windowBeginAtMs / 1000);
-    auto end_sec = (time_t)(request.windowEndAtMs / 1000);
-    auto date_begin = epochToDateStr(begin_sec - 86400);
-    auto date_end = epochToDateStr(end_sec + 86400);
+    auto beginSec = (time_t)(request._windowBeginAtMs / 1000);
+    auto endSec = (time_t)(request._windowEndAtMs / 1000);
+    // Date dirs are coarse buckets; widen by +/-1 day to avoid edge misses.
+    auto dateBegin = epochToDateStr(beginSec - 86400);
+    auto dateEnd = epochToDateStr(endSec + 86400);
 
-    auto pDir = opendir(record_dir.c_str());
+    auto pDir = opendir(recordDir.c_str());
     if (!pDir) {
         return ret;
     }
 
     while (auto entry = readdir(pDir)) {
-        string date_name = entry->d_name;
-        if (!isDateDir(date_name)) {
+        string dateName = entry->d_name;
+        if (!isDateDir(dateName)) {
             continue;
         }
-        if (date_name < date_begin || date_name > date_end) {
+        if (dateName < dateBegin || dateName > dateEnd) {
             continue;
         }
 
-        auto date_path = record_dir + "/" + date_name;
+        auto datePath = recordDir + "/" + dateName;
         struct stat st = {};
-        if (stat(date_path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+        if (stat(datePath.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
             continue;
         }
 
-        auto pSubDir = opendir(date_path.c_str());
+        auto pSubDir = opendir(datePath.c_str());
         if (!pSubDir) {
             continue;
         }
@@ -168,34 +169,35 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
                 continue;
             }
 
-            time_t file_start = 0;
-            time_t file_end = 0;
-            if (!parseFileTimestamps(fname, file_start, file_end)) {
+            time_t fileStart = 0;
+            time_t fileEnd = 0;
+            if (!parseFileTimestamps(fname, fileStart, fileEnd)) {
                 continue;
             }
 
-            auto file_begin_ms = (uint64_t)file_start * 1000;
-            auto file_end_ms = (uint64_t)file_end * 1000;
-            if (file_end_ms <= request.windowBeginAtMs || file_begin_ms >= request.windowEndAtMs) {
+            auto fileBeginMs = (uint64_t)fileStart * 1000;
+            auto fileEndMs = (uint64_t)fileEnd * 1000;
+            // Keep only files that overlap the requested playback window.
+            if (fileEndMs <= request._windowBeginAtMs || fileBeginMs >= request._windowEndAtMs) {
                 continue;
             }
 
             RtspReplaySegment seg;
-            seg.filePath = date_path + "/" + fname;
-            seg.beginAtMs = file_begin_ms;
-            seg.endAtMs = file_end_ms;
-            seg.durationMs = file_end_ms - file_begin_ms;
-            ret.segments.emplace_back(std::move(seg));
+            seg._filePath = datePath + "/" + fname;
+            seg._beginAtMs = fileBeginMs;
+            seg._endAtMs = fileEndMs;
+            seg._durationMs = fileEndMs - fileBeginMs;
+            ret._segments.emplace_back(std::move(seg));
         }
         closedir(pSubDir);
     }
     closedir(pDir);
 
-    sort(ret.segments.begin(), ret.segments.end(), [](const RtspReplaySegment &l, const RtspReplaySegment &r) {
-        if (l.beginAtMs != r.beginAtMs) {
-            return l.beginAtMs < r.beginAtMs;
+    sort(ret._segments.begin(), ret._segments.end(), [](const RtspReplaySegment &l, const RtspReplaySegment &r) {
+        if (l._beginAtMs != r._beginAtMs) {
+            return l._beginAtMs < r._beginAtMs;
         }
-        return l.filePath < r.filePath;
+        return l._filePath < r._filePath;
     });
     return ret;
 }

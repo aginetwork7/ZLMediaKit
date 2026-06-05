@@ -18,26 +18,26 @@
 namespace mediakit {
 
 struct RtspReplayRequest {
-    std::string schema;
-    std::string vhost;
-    std::string deviceId;
-    std::string channelId;
-    std::string streamType;
-    uint64_t windowBeginAtMs = 0;
-    uint64_t windowEndAtMs = 0;
+    std::string _schema;
+    std::string _vhost;
+    std::string _deviceId;
+    std::string _channelId;
+    std::string _streamType;
+    uint64_t _windowBeginAtMs = 0;
+    uint64_t _windowEndAtMs = 0;
 };
 
 struct RtspReplaySegment {
-    std::string filePath;
-    uint64_t beginAtMs = 0;
-    uint64_t endAtMs = 0;
-    uint64_t durationMs = 0;
+    std::string _filePath;
+    uint64_t _beginAtMs = 0;
+    uint64_t _endAtMs = 0;
+    uint64_t _durationMs = 0;
 };
 
 struct RtspReplayCatalogResult {
-    std::vector<RtspReplaySegment> segments;
-    uint64_t windowBeginAtMs = 0;
-    uint64_t windowEndAtMs = 0;
+    std::vector<RtspReplaySegment> _segments;
+    uint64_t _windowBeginAtMs = 0;
+    uint64_t _windowEndAtMs = 0;
 };
 
 } // namespace mediakit

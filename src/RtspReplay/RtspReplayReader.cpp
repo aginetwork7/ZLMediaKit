@@ -32,49 +32,53 @@ RtspReplayReader::RtspReplayReader(const MediaTuple &tuple, const RtspReplayCata
 }
 
 void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogResult &catalog, const ProtocolOption &option, toolkit::EventPoller::Ptr poller) {
-    if (catalog.segments.empty()) {
+    if (catalog._segments.empty()) {
         throw std::runtime_error("replay catalog is empty");
     }
-    if (catalog.windowBeginAtMs >= catalog.windowEndAtMs) {
+    if (catalog._windowBeginAtMs >= catalog._windowEndAtMs) {
         throw std::runtime_error("invalid replay window");
     }
-
-    _catalog = catalog;
-    _base_file_begin_at_ms = _catalog.segments.front().beginAtMs;
-    _window_begin_demux_ms = absoluteToDemux(_catalog.windowBeginAtMs);
-    _window_end_demux_ms = absoluteToDemux(_catalog.windowEndAtMs);
-
-    _file_list.reserve(_catalog.segments.size() * 128);
-    for (size_t i = 0; i < _catalog.segments.size(); ++i) {
-        if (i > 0) {
-            _file_list.push_back(';');
-        }
-        _file_list.append(_catalog.segments[i].filePath);
-    }
-    _origin_url = _file_list;
-
-    _poller = poller ? std::move(poller) : WorkThreadPool::Instance().getPoller();
 
     if (tuple.stream.empty()) {
         return;
     }
 
-    auto replay_window_dur_sec = (_catalog.windowEndAtMs - _catalog.windowBeginAtMs) / 1000.0f;
+    _catalog = catalog;
+    _base_file_begin_at_ms = _catalog._segments.front()._beginAtMs;
+    _window_begin_at_ms = _catalog._windowBeginAtMs;
+    _window_end_at_ms = _catalog._windowEndAtMs;
+    _window_begin_offset_ms = absoluteToOffset(_window_begin_at_ms);
+    _window_end_offset_ms = absoluteToOffset(_window_end_at_ms);
+
+    std::string file_list;
+    file_list.reserve(_catalog._segments.size() * 128);
+    for (size_t i = 0; i < _catalog._segments.size(); ++i) {
+        if (i > 0) {
+            file_list.push_back(';');
+        }
+        file_list.append(_catalog._segments[i]._filePath);
+    }
+    _origin_url = file_list;
+
+    _poller = poller ? std::move(poller) : WorkThreadPool::Instance().getPoller();
+
+   
+    auto replay_window_dur_sec = (_catalog._windowEndAtMs - _catalog._windowBeginAtMs) / 1000.0f;
     _muxer = std::make_shared<MultiMediaSourceMuxer>(tuple, replay_window_dur_sec, option);
     size_t probe_index = 0;
-    for (size_t i = 0; i < _catalog.segments.size(); ++i) {
-        const auto &seg = _catalog.segments[i];
-        if (_catalog.windowBeginAtMs >= seg.beginAtMs && _catalog.windowBeginAtMs < seg.endAtMs) {
+    for (size_t i = 0; i < _catalog._segments.size(); ++i) {
+        const auto &seg = _catalog._segments[i];
+        if (_catalog._windowBeginAtMs >= seg._beginAtMs && _catalog._windowBeginAtMs < seg._endAtMs) {
             probe_index = i;
             break;
         }
     }
 
-    const auto &probe_segment = _catalog.segments[probe_index];
+    const auto &probe_segment = _catalog._segments[probe_index];
     auto probe_demuxer = std::make_shared<MP4Demuxer>();
     auto probe_open_begin = std::chrono::steady_clock::now();
-    probe_demuxer->openMP4(probe_segment.filePath);
-    _perf_stats.setup_probe_open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    probe_demuxer->openMP4(probe_segment._filePath);
+    _perf_stats._setupProbeOpenMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - probe_open_begin)
             .count();
 
@@ -92,8 +96,56 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
     _muxer->addTrackCompleted();
 }
 
-void RtspReplayReader::bindTimeline(const std::shared_ptr<RtspReplayTimeline> &timeline) {
-    _timeline = timeline;
+uint64_t RtspReplayReader::clampToWindow(uint64_t abs_ms) const {
+    if (abs_ms < _window_begin_at_ms) {
+        return _window_begin_at_ms;
+    }
+    auto window_max = _window_end_at_ms - 1;
+    if (abs_ms > window_max) {
+        return window_max;
+    }
+    return abs_ms;
+}
+
+void RtspReplayReader::onStarted(uint64_t actual_at_ms) {
+    if (_started) {
+        throw std::runtime_error("replay session origin already set");
+    }
+    _current_at_ms = clampToWindow(actual_at_ms);
+    _started = true;
+}
+
+void RtspReplayReader::onProgressed(uint64_t actual_at_ms) {
+    if (!_started) {
+        throw std::runtime_error("replay timeline not started");
+    }
+    _current_at_ms = clampToWindow(actual_at_ms);
+}
+
+void RtspReplayReader::onSeekCompleted(uint64_t actual_at_ms) {
+    if (!_started) {
+        throw std::runtime_error("replay timeline not started");
+    }
+    _current_at_ms = clampToWindow(actual_at_ms);
+}
+
+uint64_t RtspReplayReader::resolvePlayTargetFromNpt(uint32_t npt_ms) const {
+    if (!_started) {
+        throw std::runtime_error("replay timeline not started");
+    }
+    auto target = _window_begin_at_ms + npt_ms;
+    return clampToWindow(target);
+}
+
+uint32_t RtspReplayReader::currentNptMs() const {
+    if (!_started || _current_at_ms < _window_begin_at_ms) {
+        return 0;
+    }
+    auto delta = _current_at_ms - _window_begin_at_ms;
+    if (delta > std::numeric_limits<uint32_t>::max()) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    return static_cast<uint32_t>(delta);
 }
 
 bool RtspReplayReader::start(uint64_t sample_ms, bool ref_self, bool file_repeat) {
@@ -104,54 +156,51 @@ bool RtspReplayReader::start(uint64_t sample_ms, bool ref_self, bool file_repeat
     }
 
     auto start_begin = std::chrono::steady_clock::now();
-    int64_t demux_open_ms = 0;
-    int64_t prime_track_ms = 0;
-    int64_t seek_ms = 0;
-
-    GET_CONFIG(uint32_t, sampleMS, Record::kSampleMS);
+    int64_t _demuxOpenMs = 0;
+    int64_t _primeTrackMs = 0;
 
     if (!_demuxer) {
         auto demux_open_begin = std::chrono::steady_clock::now();
-        if (!openSegmentByDemuxStamp((uint32_t)_window_begin_demux_ms)) {
+        if (!openSegmentByOffset((uint32_t)_window_begin_offset_ms)) {
             return false;
         }
-        demux_open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - demux_open_begin).count();
+        _demuxOpenMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - demux_open_begin).count();
     }
 
     auto strong_self = shared_from_this();
-    setCurrentDemuxStamp(_window_begin_demux_ms, false);
+    setCurrentOffset(_window_begin_offset_ms, false);
+
+    // Mark the session as started and fix the NPT origin BEFORE priming tracks so
+    // that primed frames are remapped to 0-based NPT. Otherwise primed frames carry
+    // the large file-offset stamp, and the paced sender baselines on that big value,
+    // forcing a dts-decrease cache flush once the first playback frame arrives.
+    _paused = false;
+    _session_origin_offset_ms = absoluteToOffset(_window_begin_at_ms);
+    onStarted(offsetToAbsolute(getCurrentOffset()));
 
     if (_muxer) {
         auto prime_track_begin = std::chrono::steady_clock::now();
         while (!_muxer->isAllTrackReady() && readNextSample()) {
             // keep priming until tracks are ready
         }
-        prime_track_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - prime_track_begin).count();
+        _primeTrackMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - prime_track_begin).count();
         _muxer->setMediaListener(strong_self);
     }
 
-    auto actual_at = demuxToAbsolute(getCurrentDemuxStamp());
-    auto ext_base_ms = demuxToAbsolute((uint32_t)_window_begin_demux_ms);
-    if (_timeline) {
-        _timeline->onStarted(actual_at);
-        _timeline->onPauseChanged(false);
-        _timeline->onSpeedChanged(1.0f);
-        _session_origin_demux_ms = absoluteToDemux(_timeline->sessionOriginAt());
-        ext_base_ms = _timeline->sessionOriginAt();
-        _timeline_started = true;
-    }
+    // Priming repeatedly pushes the file offset into the muxer timestamp via
+    // setCurrentOffset(); re-anchor the source timeline to 0 afterwards.
     if (_muxer) {
-        _muxer->setRtpExtTimeBaseMS(ext_base_ms);
+        _muxer->setRtpExtTimeBaseMS(_window_begin_at_ms);
         _muxer->setTimeStamp(0);
     }
 
-    auto start_total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_begin).count();
-    _perf_stats.start_total_ms = start_total_ms;
-    _perf_stats.demux_open_ms = demux_open_ms;
-    _perf_stats.prime_track_ms = prime_track_ms;
-    _perf_stats.seek_ms = seek_ms;
+    auto _startTotalMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_begin).count();
+    _perf_stats._startTotalMs = _startTotalMs;
+    _perf_stats._demuxOpenMs = _demuxOpenMs;
+    _perf_stats._primeTrackMs = _primeTrackMs;
 
     _file_repeat = file_repeat;
+    GET_CONFIG(uint32_t, sampleMS, Record::kSampleMS);
     auto timer_sec = (sample_ms ? sample_ms : sampleMS) / 1000.0f;
     if (ref_self) {
         _timer = std::make_shared<Timer>(timer_sec, [strong_self]() {
@@ -182,18 +231,19 @@ const RtspReplayReader::PerfStats &RtspReplayReader::getPerfStats() const {
 }
 
 uint64_t RtspReplayReader::firstPlayableAt() const {
-    if (_timeline_started && _timeline) {
-        return _timeline->sessionOriginAt();
+    if (_started) {
+        return _window_begin_at_ms;
     }
-    return demuxToAbsolute((uint32_t)_window_begin_demux_ms);
+    return offsetToAbsolute((uint32_t)_window_begin_offset_ms);
 }
 
 uint64_t RtspReplayReader::currentAt() const {
-    if (_timeline_started && _timeline) {
-        return _timeline->currentAt();
+    if (_started) {
+        return _current_at_ms;
     }
-    return demuxToAbsolute(getCurrentDemuxStamp());
+    return offsetToAbsolute(getCurrentOffset());
 }
+
 
 bool RtspReplayReader::readSample() {
     if (_paused) {
@@ -203,14 +253,14 @@ bool RtspReplayReader::readSample() {
 
     bool keyFrame = false;
     bool eof = false;
-    auto cur_stamp = getCurrentDemuxStamp();
-    while (!eof && _last_dts < cur_stamp) {
+    auto cur_offset = getCurrentOffset();
+    while (!eof && _last_dts < cur_offset) {
         auto frame = readFrameWithSegmentSwitch(keyFrame, eof);
         if (!frame) {
             continue;
         }
         _last_dts = frame->dts();
-        if (_window_end_demux_ms > 0 && _last_dts >= _window_end_demux_ms) {
+        if (_window_end_offset_ms > 0 && _last_dts >= _window_end_offset_ms) {
             eof = true;
             break;
         }
@@ -219,20 +269,20 @@ bool RtspReplayReader::readSample() {
         }
     }
 
-    if (_timeline_started && _timeline) {
-        auto progress_stamp = cur_stamp;
-        if ((uint64_t)progress_stamp < _window_begin_demux_ms) {
-            progress_stamp = (uint32_t)_window_begin_demux_ms;
+    if (_started) {
+        auto progress_offset = cur_offset;
+        if ((uint64_t)progress_offset < _window_begin_offset_ms) {
+            progress_offset = (uint32_t)_window_begin_offset_ms;
         }
-        if (_window_end_demux_ms > 0 && (uint64_t)progress_stamp >= _window_end_demux_ms) {
-            progress_stamp = (uint32_t)(_window_end_demux_ms - 1);
+        if (_window_end_offset_ms > 0 && (uint64_t)progress_offset >= _window_end_offset_ms) {
+            progress_offset = (uint32_t)(_window_end_offset_ms - 1);
         }
-        _timeline->onProgressed(demuxToAbsolute(progress_stamp));
+        onProgressed(offsetToAbsolute(progress_offset));
     }
 
     GET_CONFIG(bool, file_repeat, Record::kFileRepeat);
     if (eof && (file_repeat || _file_repeat)) {
-        return seekToDemux((uint32_t)_window_begin_demux_ms, true, true);
+        return seekToOffset((uint32_t)_window_begin_offset_ms, true, true);
     }
     return !eof;
 }
@@ -247,18 +297,18 @@ bool RtspReplayReader::readNextSample() {
     if (_muxer) {
         _muxer->inputFrame(remapFrameToSessionNpt(frame));
     }
-    setCurrentDemuxStamp(frame->dts(), false);
+    setCurrentOffset(frame->dts(), false);
     return true;
 }
 
 bool RtspReplayReader::openSegmentByIndex(size_t segment_index, uint64_t local_seek_ms) {
-    if (segment_index >= _catalog.segments.size()) {
+    if (segment_index >= _catalog._segments.size()) {
         return false;
     }
 
-    const auto &segment = _catalog.segments[segment_index];
+    const auto &segment = _catalog._segments[segment_index];
     auto demuxer = std::make_shared<MP4Demuxer>();
-    demuxer->openMP4(segment.filePath);
+    demuxer->openMP4(segment._filePath);
 
     auto duration_ms = demuxer->getDurationMS();
     auto seek_ms = local_seek_ms;
@@ -274,36 +324,36 @@ bool RtspReplayReader::openSegmentByIndex(size_t segment_index, uint64_t local_s
 
     _demuxer = std::move(demuxer);
     _active_segment_index = segment_index;
-    _active_segment_begin_demux_ms = absoluteToDemux(segment.beginAtMs);
-    _active_segment_end_demux_ms = absoluteToDemux(segment.endAtMs);
+    _active_segment_begin_offset_ms = absoluteToOffset(segment._beginAtMs);
+    _active_segment_end_offset_ms = absoluteToOffset(segment._endAtMs);
     return true;
 }
 
 size_t RtspReplayReader::locateSegmentByAbsolute(uint64_t abs_ms) const {
-    for (size_t i = 0; i < _catalog.segments.size(); ++i) {
-        const auto &segment = _catalog.segments[i];
-        if (abs_ms < segment.beginAtMs) {
+    for (size_t i = 0; i < _catalog._segments.size(); ++i) {
+        const auto &segment = _catalog._segments[i];
+        if (abs_ms < segment._beginAtMs) {
             // Target hits a gap, return the first segment after the gap.
             return i;
         }
-        if (abs_ms < segment.endAtMs) {
+        if (abs_ms < segment._endAtMs) {
             return i;
         }
     }
-    return _catalog.segments.size();
+    return _catalog._segments.size();
 }
 
-bool RtspReplayReader::openSegmentByDemuxStamp(uint32_t target_demux_ms) {
-    auto target_abs_ms = demuxToAbsolute(target_demux_ms);
+bool RtspReplayReader::openSegmentByOffset(uint32_t target_offset_ms) {
+    auto target_abs_ms = offsetToAbsolute(target_offset_ms);
     auto segment_index = locateSegmentByAbsolute(target_abs_ms);
-    if (segment_index >= _catalog.segments.size()) {
+    if (segment_index >= _catalog._segments.size()) {
         return false;
     }
 
-    const auto &segment = _catalog.segments[segment_index];
+    const auto &segment = _catalog._segments[segment_index];
     uint64_t local_seek_ms = 0;
-    if (target_abs_ms > segment.beginAtMs) {
-        local_seek_ms = target_abs_ms - segment.beginAtMs;
+    if (target_abs_ms > segment._beginAtMs) {
+        local_seek_ms = target_abs_ms - segment._beginAtMs;
     }
     return openSegmentByIndex(segment_index, local_seek_ms);
 }
@@ -315,18 +365,18 @@ Frame::Ptr RtspReplayReader::readFrameWithSegmentSwitch(bool &keyFrame, bool &eo
     while (_demuxer) {
         auto frame = _demuxer->readFrame(keyFrame, eof);
         if (frame) {
-            auto global_dts = _active_segment_begin_demux_ms + (uint64_t)frame->dts();
-            auto global_pts = _active_segment_begin_demux_ms + (uint64_t)frame->pts();
+            auto global_dts = _active_segment_begin_offset_ms + (uint64_t)frame->dts();
+            auto global_pts = _active_segment_begin_offset_ms + (uint64_t)frame->pts();
             if (global_pts < global_dts) {
                 global_pts = global_dts;
             }
 
-            if (global_dts < _window_begin_demux_ms) {
+            if (global_dts < _window_begin_offset_ms) {
                 continue;
             }
-            if (_active_segment_end_demux_ms > 0 && global_dts >= _active_segment_end_demux_ms) {
+            if (_active_segment_end_offset_ms > 0 && global_dts >= _active_segment_end_offset_ms) {
                 eof = true;
-            } else if (_window_end_demux_ms > 0 && global_dts >= _window_end_demux_ms) {
+            } else if (_window_end_offset_ms > 0 && global_dts >= _window_end_offset_ms) {
                 eof = true;
             } else {
                 auto stamped = std::make_shared<FrameStamp>(frame);
@@ -340,9 +390,9 @@ Frame::Ptr RtspReplayReader::readFrameWithSegmentSwitch(bool &keyFrame, bool &eo
         }
 
         auto next_segment_index = _active_segment_index + 1;
-        while (next_segment_index < _catalog.segments.size()) {
-            const auto &next_segment = _catalog.segments[next_segment_index];
-            if (_window_end_demux_ms > 0 && absoluteToDemux(next_segment.beginAtMs) >= _window_end_demux_ms) {
+        while (next_segment_index < _catalog._segments.size()) {
+            const auto &next_segment = _catalog._segments[next_segment_index];
+            if (_window_end_offset_ms > 0 && absoluteToOffset(next_segment._beginAtMs) >= _window_end_offset_ms) {
                 eof = true;
                 return nullptr;
             }
@@ -353,7 +403,7 @@ Frame::Ptr RtspReplayReader::readFrameWithSegmentSwitch(bool &keyFrame, bool &eo
             ++next_segment_index;
         }
 
-        if (next_segment_index >= _catalog.segments.size()) {
+        if (next_segment_index >= _catalog._segments.size()) {
             eof = true;
             return nullptr;
         }
@@ -363,56 +413,55 @@ Frame::Ptr RtspReplayReader::readFrameWithSegmentSwitch(bool &keyFrame, bool &eo
     return nullptr;
 }
 
-uint32_t RtspReplayReader::getCurrentDemuxStamp() const {
-    return (uint32_t)(_seek_to + !_paused * _speed * _seek_ticker.elapsedTime());
+uint32_t RtspReplayReader::getCurrentOffset() const {
+    // Compute in double to avoid 32-bit float mantissa loss: the offset is relative to
+    // the first segment start and can span many days (tens of millions of ms), well beyond
+    // float's ~16.7M precise integer range, which would otherwise corrupt progress/seek.
+    auto advanced = _paused ? 0.0 : (double)_speed * _seek_ticker.elapsedTime();
+    return (uint32_t)((double)_seek_to + advanced);
 }
 
-void RtspReplayReader::setCurrentDemuxStamp(uint32_t stamp, bool sync_timeline) {
-    auto old_stamp = getCurrentDemuxStamp();
-    _seek_to = stamp;
-    _last_dts = stamp;
+void RtspReplayReader::setCurrentOffset(uint32_t offset_ms, bool sync_timeline) {
+    auto old_offset = getCurrentOffset();
+    _seek_to = offset_ms;
+    _last_dts = offset_ms;
     _seek_ticker.resetTime();
 
-    if (old_stamp != stamp && _muxer) {
-        if (sync_timeline && _timeline_started && _timeline) {
-            _timeline->onSeekCompleted(demuxToAbsolute(stamp));
-            _muxer->setTimeStamp(_timeline->currentNptMs());
+    if (old_offset != offset_ms && _muxer) {
+        if (sync_timeline && _started) {
+            onSeekCompleted(offsetToAbsolute(offset_ms));
+            _muxer->setTimeStamp(currentNptMs());
         } else {
-            _muxer->setTimeStamp(stamp);
+            _muxer->setTimeStamp(offset_ms);
         }
     }
 }
 
-bool RtspReplayReader::seekToDemux(uint32_t stamp_seek, bool allow_tail_fallback, bool reopen_demux) {
-    uint64_t target_seek = stamp_seek;
-    if (target_seek < _window_begin_demux_ms) {
-        target_seek = _window_begin_demux_ms;
+bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms, bool allow_tail_fallback, bool reopen_demux) {
+    uint64_t target_seek = offset_seek_ms;
+    if (target_seek < _window_begin_offset_ms) {
+        target_seek = _window_begin_offset_ms;
     }
-    if (_window_end_demux_ms > 0 && target_seek >= _window_end_demux_ms) {
-        target_seek = _window_end_demux_ms - 1;
+    if (_window_end_offset_ms > 0 && target_seek >= _window_end_offset_ms) {
+        target_seek = _window_end_offset_ms - 1;
     }
 
-    auto target_abs_ms = demuxToAbsolute((uint32_t)target_seek);
+    auto target_abs_ms = offsetToAbsolute((uint32_t)target_seek);
     auto target_segment_index = locateSegmentByAbsolute(target_abs_ms);
-    if (target_segment_index >= _catalog.segments.size()) {
+    if (target_segment_index >= _catalog._segments.size()) {
         return false;
     }
 
-    const auto &target_segment = _catalog.segments[target_segment_index];
-    auto target_in_segment = target_abs_ms >= target_segment.beginAtMs && target_abs_ms < target_segment.endAtMs;
-
-    if (_muxer && _timeline_started) {
-        auto npt_seek = target_seek > _session_origin_demux_ms ? (target_seek - _session_origin_demux_ms) : 0;
-        _muxer->resetPacedSender(npt_seek);
-    }
+    const auto &target_segment = _catalog._segments[target_segment_index];
+    auto target_in_segment = target_abs_ms >= target_segment._beginAtMs && target_abs_ms < target_segment._endAtMs;
 
     size_t segment_index = target_segment_index;
-    while (segment_index < _catalog.segments.size()) {
-        const auto &segment = _catalog.segments[segment_index];
+    while (segment_index < _catalog._segments.size()) {
+        const auto &segment = _catalog._segments[segment_index];
         auto prefer_before_target = segment_index == target_segment_index && target_in_segment;
         uint64_t local_target_ms = 0;
-        if (segment_index == target_segment_index && target_abs_ms > segment.beginAtMs) {
-            local_target_ms = target_abs_ms - segment.beginAtMs;
+        if (segment_index == target_segment_index && target_abs_ms > segment._beginAtMs) {
+            local_target_ms = target_abs_ms - segment._beginAtMs;
         }
 
         auto need_reopen = reopen_demux || !_demuxer || _active_segment_index != segment_index;
@@ -441,30 +490,38 @@ bool RtspReplayReader::seekToDemux(uint32_t stamp_seek, bool allow_tail_fallback
                 continue;
             }
 
-            auto global_dts = _active_segment_begin_demux_ms + (uint64_t)frame->dts();
-            auto global_pts = _active_segment_begin_demux_ms + (uint64_t)frame->pts();
+            auto global_dts = _active_segment_begin_offset_ms + (uint64_t)frame->dts();
+            auto global_pts = _active_segment_begin_offset_ms + (uint64_t)frame->pts();
             if (global_pts < global_dts) {
                 global_pts = global_dts;
             }
-            if (global_dts < _window_begin_demux_ms) {
+            if (global_dts < _window_begin_offset_ms) {
                 continue;
             }
-            if (_window_end_demux_ms > 0 && global_dts >= _window_end_demux_ms) {
+            if (_window_end_offset_ms > 0 && global_dts >= _window_end_offset_ms) {
                 break;
             }
 
             auto stamped = std::make_shared<FrameStamp>(frame);
             stamped->setStamp((int64_t)global_dts, (int64_t)global_pts);
             if (_muxer) {
+                if (_started) {
+                    // Re-anchor the paced sender on the actually located frame instead of the
+                    // requested seek position. For hole-forward hits the playable frame is later
+                    // than the request, and for in-segment hits the nearest key frame may be
+                    // earlier; baselining on the request causes a dts-decrease cache flush (visible stall).
+                    auto npt_actual = global_dts > _session_origin_offset_ms ? (global_dts - _session_origin_offset_ms) : 0;
+                    _muxer->resetPacedSender((uint32_t)npt_actual);
+                }
                 _muxer->inputFrame(remapFrameToSessionNpt(stamped));
             }
-            setCurrentDemuxStamp((uint32_t)global_dts, true);
+            setCurrentOffset((uint32_t)global_dts, true);
 
             DebugL << "replay seek: target_abs_ms=" << target_abs_ms
                    << ", seek_hit_type=" << (prefer_before_target ? "in-segment" : "hole-forward")
                    << ", segment_index=" << segment_index
-                   << ", actual_play_abs_ms=" << demuxToAbsolute((uint32_t)global_dts)
-                   << ", delta_ms=" << ((int64_t)demuxToAbsolute((uint32_t)global_dts) - (int64_t)target_abs_ms);
+                   << ", actual_play_abs_ms=" << offsetToAbsolute((uint32_t)global_dts)
+                   << ", delta_ms=" << ((int64_t)offsetToAbsolute((uint32_t)global_dts) - (int64_t)target_abs_ms);
             return true;
         }
 
@@ -477,11 +534,15 @@ bool RtspReplayReader::seekToDemux(uint32_t stamp_seek, bool allow_tail_fallback
     }
 
     WarnL << "replay seek fallback without playable frame, target_abs_ms=" << target_abs_ms;
-    setCurrentDemuxStamp((uint32_t)target_seek, true);
+    if (_muxer && _started) {
+        auto npt_seek = target_seek > _session_origin_offset_ms ? (target_seek - _session_origin_offset_ms) : 0;
+        _muxer->resetPacedSender((uint32_t)npt_seek);
+    }
+    setCurrentOffset((uint32_t)target_seek, true);
     return true;
 }
 
-uint32_t RtspReplayReader::absoluteToDemux(uint64_t abs_ms) const {
+uint32_t RtspReplayReader::absoluteToOffset(uint64_t abs_ms) const {
     if (abs_ms <= _base_file_begin_at_ms) {
         return 0;
     }
@@ -492,17 +553,17 @@ uint32_t RtspReplayReader::absoluteToDemux(uint64_t abs_ms) const {
     return (uint32_t)delta;
 }
 
-uint64_t RtspReplayReader::demuxToAbsolute(uint32_t demux_ms) const {
-    return _base_file_begin_at_ms + demux_ms;
+uint64_t RtspReplayReader::offsetToAbsolute(uint32_t offset_ms) const {
+    return _base_file_begin_at_ms + offset_ms;
 }
 
 Frame::Ptr RtspReplayReader::remapFrameToSessionNpt(const Frame::Ptr &frame) const {
-    if (!frame || !_timeline_started) {
+    if (!frame || !_started) {
         return frame;
     }
 
-    auto dts = (int64_t)frame->dts() - (int64_t)_session_origin_demux_ms;
-    auto pts = (int64_t)frame->pts() - (int64_t)_session_origin_demux_ms;
+    auto dts = (int64_t)frame->dts() - (int64_t)_session_origin_offset_ms;
+    auto pts = (int64_t)frame->pts() - (int64_t)_session_origin_offset_ms;
     if (dts < 0) {
         dts = 0;
     }
@@ -518,24 +579,27 @@ Frame::Ptr RtspReplayReader::remapFrameToSessionNpt(const Frame::Ptr &frame) con
 bool RtspReplayReader::seekTo(MediaSource &sender, uint32_t stamp) {
     lock_guard<recursive_mutex> lck(_mtx);
 
-    if (!_timeline_started || !_timeline) {
+    if (!_started) {
         if (!start(0, true, false)) {
             return false;
         }
     }
 
-    pause(sender, false);
+    // Seek implies resuming playback. Only clear the paused flag here; the timeline is
+    // re-anchored by the seekToOffset() below on the actually located frame, so calling
+    // pause(false) (which would setCurrentOffset on the stale position) is redundant.
+    _paused = false;
 
-    auto target_abs = _timeline->resolvePlayTargetFromNpt(stamp);
-    auto target_demux = absoluteToDemux(target_abs);
-    TraceL << getOriginUrl(sender) << ",npt_ms:" << stamp << ",target_abs:" << target_abs << ",target_demux:" << target_demux;
-    return seekToDemux(target_demux, true);
+    auto target_abs = resolvePlayTargetFromNpt(stamp);
+    auto target_offset = absoluteToOffset(target_abs);
+    TraceL << getOriginUrl(sender) << ",npt_ms:" << stamp << ",target_abs:" << target_abs << ",target_offset:" << target_offset;
+    return seekToOffset(target_offset, true);
 }
 
 bool RtspReplayReader::pause(MediaSource &sender, bool pause_value) {
     lock_guard<recursive_mutex> lck(_mtx);
 
-    if (!_timeline_started) {
+    if (!_started) {
         if (!start(0, true, false)) {
             return false;
         }
@@ -544,11 +608,8 @@ bool RtspReplayReader::pause(MediaSource &sender, bool pause_value) {
     if (_paused == pause_value) {
         return true;
     }
-    setCurrentDemuxStamp(getCurrentDemuxStamp(), true);
+    setCurrentOffset(getCurrentOffset(), true);
     _paused = pause_value;
-    if (_timeline_started && _timeline) {
-        _timeline->onPauseChanged(pause_value);
-    }
     TraceL << getOriginUrl(sender) << ",pause:" << pause_value;
     return true;
 }
@@ -556,7 +617,7 @@ bool RtspReplayReader::pause(MediaSource &sender, bool pause_value) {
 bool RtspReplayReader::speed(MediaSource &sender, float speed_value) {
     lock_guard<recursive_mutex> lck(_mtx);
 
-    if (!_timeline_started) {
+    if (!_started) {
         if (!start(0, true, false)) {
             return false;
         }
@@ -567,16 +628,15 @@ bool RtspReplayReader::speed(MediaSource &sender, float speed_value) {
         return false;
     }
 
-    setCurrentDemuxStamp(getCurrentDemuxStamp(), true);
+    setCurrentOffset(getCurrentOffset(), true);
     _paused = false;
     if (_speed == speed_value) {
         return true;
     }
 
     _speed = speed_value;
-    if (_timeline_started && _timeline) {
-        _timeline->onPauseChanged(false);
-        _timeline->onSpeedChanged(speed_value);
+    if (_muxer) {
+        _muxer->setSpeed(speed_value);
     }
     TraceL << getOriginUrl(sender) << ",speed:" << speed_value;
     return true;

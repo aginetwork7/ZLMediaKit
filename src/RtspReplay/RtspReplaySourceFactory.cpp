@@ -20,7 +20,6 @@
 #include "Util/util.h"
 #include "RtspReplayCatalog.h"
 #include "RtspReplayReader.h"
-#include "RtspReplayTimeline.h"
 
 #include <atomic>
 #include <chrono>
@@ -49,8 +48,8 @@ static bool isDigits(const string &s) {
     return true;
 }
 
-bool RtspReplaySourceFactory::validateStreamKey(const string &stream_id) {
-    auto parts = split(stream_id, "/");
+bool RtspReplaySourceFactory::validateStreamKey(const string &streamId) {
+    auto parts = split(streamId, "/");
     if (parts.size() != 5) {
         return false;
     }
@@ -69,41 +68,39 @@ bool RtspReplaySourceFactory::validateStreamKey(const string &stream_id) {
     return true;
 }
 
-void createReplaySession(const string &schema, const string &vhost, const string &stream_id, string &out_session_stream) {
-    RtspReplaySourceFactory::create(schema, vhost, stream_id, out_session_stream);
+void createReplaySession(const string &schema, const string &vhost, const string &streamId, string &out_session_stream) {
+    RtspReplaySourceFactory::create(schema, vhost, streamId, out_session_stream);
 }
 
-void RtspReplaySourceFactory::create(const string &schema, const string &vhost, const string &stream_id, string &out_session_stream) {
-    auto create_begin = std::chrono::steady_clock::now();
-    int64_t parse_ms = 0;
-
-    out_session_stream.clear();
-
-    if (!validateStreamKey(stream_id)) {
+void RtspReplaySourceFactory::create(const string &schema, const string &vhost, const string &streamId, string &out_session_stream) {
+    if (!validateStreamKey(streamId)) {
         return;
     }
 
+    auto create_begin = std::chrono::steady_clock::now();
+    int64_t parse_ms = 0;
+    out_session_stream.clear();
     RtspReplayRequest request;
+
     try {
         auto parse_begin = std::chrono::steady_clock::now();
-        request = RtspReplayCatalog::parseRequest(schema, vhost, stream_id);
+        request = RtspReplayCatalog::parseRequest(schema, vhost, streamId);
         parse_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - parse_begin).count();
     } catch (const exception &ex) {
-        WarnL << "replay: invalid request: " << stream_id << ", err=" << ex.what();
+        WarnL << "replay: invalid request: " << streamId << ", err=" << ex.what();
         return;
     }
 
     auto build_begin = std::chrono::steady_clock::now();
     auto catalog = RtspReplayCatalog::build(request);
     auto build_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - build_begin).count();
-    if (catalog.segments.empty()) {
-        WarnL << "replay: no recording files found for: " << stream_id;
+    if (catalog._segments.empty()) {
+        WarnL << "replay: no recording files found for: " << streamId;
         return;
     }
 
     try {
-        auto session_stream = request.deviceId + "/" + request.channelId + "/" + request.streamType + "/sid_" + makeRandStr(8);
-        auto timeline = std::make_shared<RtspReplayTimeline>(request.windowBeginAtMs, request.windowEndAtMs);
+        auto session_stream = request._deviceId + "/" + request._channelId + "/" + request._streamType + "/sid_" + makeRandStr(8);
 
         ProtocolOption option;
         option.enable_mp4 = false;
@@ -116,7 +113,6 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
         auto reader_setup_begin = std::chrono::steady_clock::now();
         auto reader = std::make_shared<RtspReplayReader>(tuple, catalog, option);
         auto reader_setup_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - reader_setup_begin).count();
-        reader->bindTimeline(timeline);
         if (!reader->start(0, true, false)) {
             throw std::runtime_error("failed to start replay reader");
         }
@@ -151,13 +147,12 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
               << ", parse_ms=" << parse_ms
               << ", catalog_build_ms=" << build_ms
               << ", reader_setup_ms=" << reader_setup_ms
-              << ", probe_open_ms=" << reader_perf.setup_probe_open_ms
-              << ", start_total_ms=" << reader_perf.start_total_ms
-              << ", demux_open_ms=" << reader_perf.demux_open_ms
-              << ", prime_track_ms=" << reader_perf.prime_track_ms
-              << ", seek_ms=" << reader_perf.seek_ms;
+              << ", probe_open_ms=" << reader_perf._setupProbeOpenMs
+              << ", start_total_ms=" << reader_perf._startTotalMs
+              << ", demux_open_ms=" << reader_perf._demuxOpenMs
+              << ", prime_track_ms=" << reader_perf._primeTrackMs;
         InfoL << "replay: session started, stream=" << session_stream
-              << ", files count=" << catalog.segments.size();
+              << ", files count=" << catalog._segments.size();
     } catch (const std::exception &ex) {
         WarnL << "replay: failed to create session: " << ex.what();
     }

@@ -264,6 +264,21 @@ bool RtspReplayReader::readSample() {
             eof = true;
             break;
         }
+        // Hole-forward: a genuine recording gap leaves the next playable frame far beyond the
+        // real-time playhead (its dts jumps by a whole gap, not the sub-frame overshoot of normal
+        // catch-up). Snap the timeline (and paced sender) forward onto this frame instead of
+        // letting getCurrentOffset() crawl through the gap in real time with no output, which would
+        // stall the TCP stream long enough for the client to declare a timeout and TEARDOWN.
+        // The threshold keeps normal playback (where each batch's last frame slightly overshoots
+        // cur_offset) from being mistaken for a hole and triggering spurious resyncs.
+        static constexpr uint32_t kHoleForwardThresholdMs = 1000;
+        if (_last_dts > cur_offset + kHoleForwardThresholdMs) {
+            setCurrentOffset(_last_dts, true);
+            cur_offset = _last_dts;
+            if (_muxer) {
+                _muxer->resetPacedSender(currentNptMs());
+            }
+        }
         if (_muxer) {
             _muxer->inputFrame(remapFrameToSessionNpt(frame));
         }

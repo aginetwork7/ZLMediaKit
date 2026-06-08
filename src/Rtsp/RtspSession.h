@@ -36,6 +36,7 @@ public:
     using onAuth = std::function<void(bool encrypted, const std::string &pwd_or_md5)>;
 
     RtspSession(const toolkit::Socket::Ptr &sock);
+    ~RtspSession() override;
     ////Session override////
     void onRecv(const toolkit::Buffer::Ptr &buf) override;
     void onError(const toolkit::SockException &err) override;
@@ -278,6 +279,10 @@ private:
     bool _seek_probe_pending = false;
     uint32_t _seek_probe_req_ms = 0;
     uint32_t _seek_probe_actual_ms = 0;
+
+    // 真实 active 播放会话配额持有标记（进入 PLAY 后置位，析构时归还）
+    bool _play_quota_acquired = false;
+    bool _play_quota_is_replay = false;
 };
 
 /**

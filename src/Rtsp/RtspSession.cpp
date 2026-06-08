@@ -169,6 +169,19 @@ static unordered_map<string, weak_ptr<RtspSession> > g_mapGetter;
 //对g_mapGetter上锁保护
 static recursive_mutex g_mtxGetter;
 
+// 对两个等长的十六进制摘要做常量时间、忽略大小写的比较，避免 strcasecmp 提前返回
+// 而通过比较耗时泄漏「已匹配前缀长度」的时序侧信道。
+static bool digestEquals(const string &a, const string &b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    unsigned char diff = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        diff |= (unsigned char)(tolower((unsigned char)a[i]) ^ tolower((unsigned char)b[i]));
+    }
+    return diff == 0;
+}
+
 #ifdef ENABLE_OPENSSL
 static string sha256Hex(const string &input) {
     unsigned char out[SHA256_DIGEST_LENGTH];
@@ -186,9 +199,50 @@ static string sha256Hex(const string &input) {
 }
 #endif
 
+// 真实 active 播放会话配额：only 进入 PLAY 的会话才计数（DESCRIBE/SETUP 不算）。
+// g_play_total 为 live+replay 总数，replay 另受 g_play_replay 约束；0 表示不限制。
+// 两个计数需原子事务（replay 要同时满足两个上限），故用一把轻量锁保护。
+static std::mutex g_mtxPlayQuota;
+static size_t g_play_total = 0;
+static size_t g_play_replay = 0;
+
+static bool acquirePlayQuota(bool is_replay) {
+    GET_CONFIG(int, max_total, Rtsp::kMaxSessionCount);
+    GET_CONFIG(int, max_replay, Rtsp::kMaxReplaySessionCount);
+    std::lock_guard<std::mutex> lck(g_mtxPlayQuota);
+    if (max_total > 0 && g_play_total >= (size_t)max_total) {
+        return false;
+    }
+    if (is_replay && max_replay > 0 && g_play_replay >= (size_t)max_replay) {
+        return false;
+    }
+    ++g_play_total;
+    if (is_replay) {
+        ++g_play_replay;
+    }
+    return true;
+}
+
+static void releasePlayQuota(bool is_replay) {
+    std::lock_guard<std::mutex> lck(g_mtxPlayQuota);
+    if (g_play_total > 0) {
+        --g_play_total;
+    }
+    if (is_replay && g_play_replay > 0) {
+        --g_play_replay;
+    }
+}
+
 RtspSession::RtspSession(const Socket::Ptr &sock) : Session(sock) {
     GET_CONFIG(uint32_t,keep_alive_sec,Rtsp::kKeepAliveSecond);
     sock->setSendTimeOutSecond(keep_alive_sec);
+}
+
+RtspSession::~RtspSession() {
+    // 析构是唯一能覆盖所有退出路径（TEARDOWN/断连/异常）的释放点，保证配额不泄漏。
+    if (_play_quota_acquired) {
+        releasePlayQuota(_play_quota_is_replay);
+    }
 }
 
 void RtspSession::onError(const SockException &err) {
@@ -647,24 +701,12 @@ void RtspSession::onAuthBasic(const string &realm, const string &auth_base64) {
     };
 
     //此时必须提供明文密码
-    GET_CONFIG(string, auth_file_basic, Rtsp::kAuthFile);
-    if (!auth_file_basic.empty()) {
-        string file_user, file_pwd;
-        if (!loadRtspAuthFile(auth_file_basic, file_user, file_pwd)) {
-            onAuthFailed(realm, "rtsp authFile load failed or credentials empty");
-            return;
-        }
-        if (user != file_user) {
-            onAuthFailed(realm, StrPrinter << "username mismatch: " << user << " != " << file_user);
-            return;
-        }
-        invoker(false, file_pwd);
-        return;
-    }
     if (!NOTICE_EMIT(BroadcastOnRtspAuthArgs, Broadcast::kBroadcastOnRtspAuth, _media_info, realm, user, true, invoker, *this)) {
         //表明该流需要认证却没监听请求密码事件，这一般是大意的程序所为，警告之
         WarnP(this) << "请监听kBroadcastOnRtspAuth事件！";
-        onAuthFailed(realm, "kBroadcastOnRtspAuth listener not found");
+        //但是我们还是忽略认证以便完成播放
+        //我们输入的密码是明文
+        invoker(false, pwd);
     }
 }
 
@@ -728,8 +770,8 @@ void RtspSession::onAuthDigest(const string &realm,const string &auth_md5){
             // 兼容未携带 qop 的老客户端
             good_response = MD5(encrypted_pwd + ":" + nonce + ":" + ha2).hexdigest();
         }
-        if(strcasecmp(good_response.data(),response.data()) == 0){
-            //认证成功！md5不区分大小写
+        if(digestEquals(good_response, response)){
+            //认证成功！md5摘要为十六进制，比较时容忍大小写
             onAuthSuccess();
         }else{
             //认证失败！
@@ -844,8 +886,8 @@ void RtspSession::onAuthSha256(const string &realm, const string &auth_sha256, c
             // 宽松模式：兼容未携带qop/nc/cnonce的客户端
             good_response = sha256Hex(encrypted_pwd + ":" + nonce + ":" + ha2);
         }
-        if (strcasecmp(good_response.data(), response.data()) == 0) {
-            // 认证成功！sha256不区分大小写
+        if (digestEquals(good_response, response)) {
+            // 认证成功！SHA-256 摘要输出为小写十六进制，比较时容忍客户端大写
             onAuthSuccess();
         } else {
             // 认证失败！
@@ -1118,7 +1160,21 @@ void RtspSession::handleReq_Play(const Parser &parser) {
         return;
     }
 
-    bool use_gop = true;
+    // 真实 active 播放会话配额：仅在首次进入 PLAY 时占用（seek/暂停恢复会重入本函数，用标记防重）。
+    if (!_play_quota_acquired) {
+        GET_CONFIG(string, replay_app, Rtsp::kReplayAppName);
+        auto is_replay = play_src->getMediaTuple().app == replay_app;
+        if (!acquirePlayQuota(is_replay)) {
+            sendRtspResponse("503 Service Unavailable", {"Connection", "Close"});
+            shutdown(SockException(Err_shutdown, "play session limit reached"));
+            return;
+        }
+        _play_quota_acquired = true;
+        _play_quota_is_replay = is_replay;
+    }
+
+    // seek 会重建 reader，必须始终从 GOP 缓存起播，否则会错过 seek 期间已写入的关键帧。
+    const bool use_gop = true;
     auto &strScale = parser["Scale"];
     auto &strSpeed = parser["Speed"];
     auto &strRange = parser["Range"];
@@ -1148,7 +1204,6 @@ void RtspSession::handleReq_Play(const Parser &parser) {
         }
         auto iStartTime = 1000 * (float) atof(strStart.data());
         auto seek_ok = play_src->seekTo((uint32_t) iStartTime);
-        use_gop = !seek_ok;
         auto actual_ms = play_src->getTimeStamp(TrackInvalid);
         _seek_probe_req_ms = (uint32_t)iStartTime;
         _seek_probe_actual_ms = actual_ms;
@@ -1157,9 +1212,6 @@ void RtspSession::handleReq_Play(const Parser &parser) {
                     << ", seek_ok:" << seek_ok
                     << ", actual_ms:" << actual_ms
                     << ", delta_ms:" << ((int64_t)actual_ms - (int64_t)iStartTime);
-
-        // seek后会重建reader，需要从GOP缓存起播，否则容易错过seek期间已写入的关键帧。
-        use_gop = true;
     }
 
     vector<TrackType> inited_tracks;

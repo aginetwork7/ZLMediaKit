@@ -36,36 +36,15 @@ static void releaseReplaySession(const string &session_stream, void *listener_ta
     }
 }
 
-static bool isDigits(const string &s) {
-    if (s.empty()) {
-        return false;
-    }
-    for (auto ch : s) {
-        if (ch < '0' || ch > '9') {
-            return false;
-        }
-    }
-    return true;
-}
-
 bool RtspReplaySourceFactory::validateStreamKey(const string &streamId) {
-    auto parts = split(streamId, "/");
-    if (parts.size() != 5) {
+    // Reuse parseRequest as the single validation source so the two paths can't drift; here it
+    // is only a cheap non-throwing gate.
+    try {
+        RtspReplayCatalog::parseRequest("", "", streamId);
+        return true;
+    } catch (const exception &) {
         return false;
     }
-    if (parts[0].empty() || parts[1].empty()) {
-        return false;
-    }
-    if (parts[2].size() < 2 || parts[2][0] != 's') {
-        return false;
-    }
-    if (parts[3].size() < 2 || parts[3][0] != 'b' || !isDigits(parts[3].substr(1))) {
-        return false;
-    }
-    if (parts[4].size() < 2 || parts[4][0] != 'e' || !isDigits(parts[4].substr(1))) {
-        return false;
-    }
-    return true;
 }
 
 void createReplaySession(const string &schema, const string &vhost, const string &streamId, string &out_session_stream) {
@@ -73,10 +52,6 @@ void createReplaySession(const string &schema, const string &vhost, const string
 }
 
 void RtspReplaySourceFactory::create(const string &schema, const string &vhost, const string &streamId, string &out_session_stream) {
-    if (!validateStreamKey(streamId)) {
-        return;
-    }
-
     auto create_begin = std::chrono::steady_clock::now();
     int64_t parse_ms = 0;
     out_session_stream.clear();
@@ -100,7 +75,7 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
     }
 
     try {
-        auto session_stream = request._deviceId + "/" + request._channelId + "/" + request._streamType + "/sid_" + makeRandStr(8);
+        auto session_stream = request._device_id + "/" + request._channel_id + "/" + request._stream_type + "/sid_" + makeRandStr(8);
 
         ProtocolOption option;
         option.enable_mp4 = false;
@@ -118,6 +93,9 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
         }
         const auto &reader_perf = reader->getPerfStats();
 
+        // Use the reader's raw pointer purely as the NoticeCenter listener key (it is never
+        // dereferenced through this tag). The reader stays alive because its own repeating Timer
+        // captures a shared_ptr to itself, so the tag remains a valid unique id until cleanup.
         auto listener_tag = reader.get();
         auto released = std::make_shared<std::atomic<bool>>(false);
         NoticeCenter::Instance().addListener(listener_tag, Broadcast::kBroadcastMediaChanged, [session_stream, listener_tag, released](BroadcastMediaChangedArgs) {
@@ -147,10 +125,10 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
               << ", parse_ms=" << parse_ms
               << ", catalog_build_ms=" << build_ms
               << ", reader_setup_ms=" << reader_setup_ms
-              << ", probe_open_ms=" << reader_perf._setupProbeOpenMs
-              << ", start_total_ms=" << reader_perf._startTotalMs
-              << ", demux_open_ms=" << reader_perf._demuxOpenMs
-              << ", prime_track_ms=" << reader_perf._primeTrackMs;
+              << ", probe_open_ms=" << reader_perf._setup_probe_open_ms
+              << ", start_total_ms=" << reader_perf._start_total_ms
+              << ", demux_open_ms=" << reader_perf._demux_open_ms
+              << ", prime_track_ms=" << reader_perf._prime_track_ms;
         InfoL << "replay: session started, stream=" << session_stream
               << ", files count=" << catalog._segments.size();
     } catch (const std::exception &ex) {

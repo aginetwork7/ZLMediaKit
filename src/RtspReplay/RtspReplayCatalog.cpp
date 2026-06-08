@@ -11,6 +11,7 @@
 #include "RtspReplayCatalog.h"
 
 #include "Common/config.h"
+#include "Record/RecordFileName.h"
 #include "Util/File.h"
 #include "Util/util.h"
 
@@ -24,37 +25,6 @@ using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
-
-static bool parseFileTimestamps(const string &name, time_t &start_sec, time_t &end_sec) {
-    if (name.size() < 43 || name.substr(name.size() - 4) != ".mp4") {
-        return false;
-    }
-
-    auto base = name.substr(0, name.size() - 4);
-    auto sep = base.find('_');
-    if (sep == string::npos || sep < 19) {
-        return false;
-    }
-
-    struct tm start_tm = {};
-    if (!strptime(base.substr(0, 19).c_str(), "%Y-%m-%d-%H-%M-%S", &start_tm)) {
-        return false;
-    }
-
-    auto end_part = base.substr(sep + 1);
-    if (end_part.size() < 19) {
-        return false;
-    }
-
-    struct tm end_tm = {};
-    if (!strptime(end_part.substr(0, 19).c_str(), "%Y-%m-%d-%H-%M-%S", &end_tm)) {
-        return false;
-    }
-
-    start_sec = timegm(&start_tm);
-    end_sec = timegm(&end_tm);
-    return start_sec > 0 && end_sec > start_sec;
-}
 
 static bool isDateDir(const string &name) {
     return name.size() == 10 && name[4] == '-' && name[7] == '-';
@@ -72,6 +42,10 @@ RtspReplayRequest RtspReplayCatalog::parseRequest(const string &schema, const st
     auto parts = split(streamId, "/");
     if (parts.size() != 5) {
         throw invalid_argument("invalid replay stream id");
+    }
+
+    if (parts[0].empty() || parts[1].empty()) {
+        throw invalid_argument("invalid replay device/channel");
     }
 
     if (parts[2].empty() || parts[2][0] != 's') {
@@ -106,18 +80,18 @@ RtspReplayRequest RtspReplayCatalog::parseRequest(const string &schema, const st
     RtspReplayRequest request;
     request._schema = schema;
     request._vhost = vhost;
-    request._deviceId = parts[0];
-    request._channelId = parts[1];
-    request._streamType = parts[2];
-    request._windowBeginAtMs = begin_ms;
-    request._windowEndAtMs = end_ms;
+    request._device_id = parts[0];
+    request._channel_id = parts[1];
+    request._stream_type = parts[2];
+    request._window_begin_at_ms = begin_ms;
+    request._window_end_at_ms = end_ms;
     return request;
 }
 
 RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &request) {
     RtspReplayCatalogResult ret;
-    ret._windowBeginAtMs = request._windowBeginAtMs;
-    ret._windowEndAtMs = request._windowEndAtMs;
+    ret._window_begin_at_ms = request._window_begin_at_ms;
+    ret._window_end_at_ms = request._window_end_at_ms;
 
     GET_CONFIG(string, recordPath, Protocol::kMP4SavePath);
     GET_CONFIG(string, recordAppName, Record::kAppName);
@@ -126,14 +100,14 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
     const string liveApp = "live";
     string relativePath;
     if (enableVhost) {
-        relativePath = request._vhost + "/" + recordAppName + "/" + liveApp + "/" + request._deviceId + "/" + request._channelId + "/" + request._streamType;
+        relativePath = request._vhost + "/" + recordAppName + "/" + liveApp + "/" + request._device_id + "/" + request._channel_id + "/" + request._stream_type;
     } else {
-        relativePath = recordAppName + "/" + liveApp + "/" + request._deviceId + "/" + request._channelId + "/" + request._streamType;
+        relativePath = recordAppName + "/" + liveApp + "/" + request._device_id + "/" + request._channel_id + "/" + request._stream_type;
     }
     auto recordDir = File::absolutePath(relativePath, recordPath);
 
-    auto beginSec = (time_t)(request._windowBeginAtMs / 1000);
-    auto endSec = (time_t)(request._windowEndAtMs / 1000);
+    auto beginSec = (time_t)(request._window_begin_at_ms / 1000);
+    auto endSec = (time_t)(request._window_end_at_ms / 1000);
     // Date dirs are coarse buckets; widen by +/-1 day to avoid edge misses.
     auto dateBegin = epochToDateStr(beginSec - 86400);
     auto dateEnd = epochToDateStr(endSec + 86400);
@@ -171,22 +145,22 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
 
             time_t fileStart = 0;
             time_t fileEnd = 0;
-            if (!parseFileTimestamps(fname, fileStart, fileEnd)) {
+            if (!parseRecordFileName(fname, fileStart, fileEnd)) {
                 continue;
             }
 
             auto fileBeginMs = (uint64_t)fileStart * 1000;
             auto fileEndMs = (uint64_t)fileEnd * 1000;
             // Keep only files that overlap the requested playback window.
-            if (fileEndMs <= request._windowBeginAtMs || fileBeginMs >= request._windowEndAtMs) {
+            if (fileEndMs <= request._window_begin_at_ms || fileBeginMs >= request._window_end_at_ms) {
                 continue;
             }
 
             RtspReplaySegment seg;
-            seg._filePath = datePath + "/" + fname;
-            seg._beginAtMs = fileBeginMs;
-            seg._endAtMs = fileEndMs;
-            seg._durationMs = fileEndMs - fileBeginMs;
+            seg._file_path = datePath + "/" + fname;
+            seg._begin_at_ms = fileBeginMs;
+            seg._end_at_ms = fileEndMs;
+            seg._duration_ms = fileEndMs - fileBeginMs;
             ret._segments.emplace_back(std::move(seg));
         }
         closedir(pSubDir);
@@ -194,10 +168,10 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
     closedir(pDir);
 
     sort(ret._segments.begin(), ret._segments.end(), [](const RtspReplaySegment &l, const RtspReplaySegment &r) {
-        if (l._beginAtMs != r._beginAtMs) {
-            return l._beginAtMs < r._beginAtMs;
+        if (l._begin_at_ms != r._begin_at_ms) {
+            return l._begin_at_ms < r._begin_at_ms;
         }
-        return l._filePath < r._filePath;
+        return l._file_path < r._file_path;
     });
     return ret;
 }

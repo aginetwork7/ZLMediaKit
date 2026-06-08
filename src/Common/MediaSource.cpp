@@ -18,6 +18,7 @@
 #include "Common/MultiMediaSourceMuxer.h"
 #include "Record/MP4Reader.h"
 #include "RtspReplay/RtspReplaySourceFactory.h"
+#include "Thread/WorkThreadPool.h"
 #include "PacketCache.h"
 
 using namespace std;
@@ -385,16 +386,10 @@ static MediaSource::Ptr find_l(const string &schema, const string &vhost_in, con
 
 static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &session, bool retry,
                         const function<void(const MediaSource::Ptr &src)> &cb){
-    bool replay_mode = false;
-    string replay_session_stream;
-#ifdef ENABLE_MP4
-    // replay: 仅在 stream id 命中 replay 规则时创建独立会话，避免影响其他业务路径
-    if (retry && RtspReplaySourceFactory::validateStreamKey(info.stream)) {
-        createReplaySession(info.schema, info.vhost, info.stream, replay_session_stream);
-        replay_mode = !replay_session_stream.empty();
-    }
-#endif
-
+    // Continuation that performs the actual lookup. For replay it is invoked after the heavy
+    // catalog scan / openMP4 probe has finished off the request poller; for every other path it
+    // runs synchronously right below, identical to the original flow.
+    auto run_find = [info, session, retry, cb](bool replay_mode, const string &replay_session_stream) {
     GET_CONFIG(string, replay_app, Rtsp::kReplayAppName);
     const string target_app = replay_mode ? replay_app : info.app;
     const string target_stream = replay_mode ? replay_session_stream : info.stream;
@@ -484,6 +479,8 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
     NoticeCenter::Instance().addListener(listener_tag, Broadcast::kBroadcastMediaChanged, on_register);
 
     if (replay_mode) {
+        // replay 预备源的超时清理由工厂自带的延时任务负责，故这里不再装配 player 侧
+        // NotFoundStream 兑底；仅关闭首次 find() 与 listener 注册之间的竞态窗口。
         // Close the gap between first find() and listener registration.
         if (auto ready_src = find_target()) {
             cancel_all();
@@ -503,6 +500,33 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
     // 广播未找到流,此时可以立即去拉流，这样还来得及  [AUTO-TRANSLATED:794014f1]
     // Broadcast that the stream is not found, at this time you can immediately pull the stream, so it is still in time
     NOTICE_EMIT(BroadcastNotFoundStreamArgs, Broadcast::kBroadcastNotFoundStream, info, *session, close_player);
+    }; // run_find
+
+#ifdef ENABLE_MP4
+    // replay: stream id 命中 replay 规则时创建独立会话; 放到 WorkThreadPool 执行，避免阻塞请求方 poller
+    // 上挂载的其它连接；完成后切回原 poller，保持 NoticeCenter/Session 线程模型一致。
+    if (retry && RtspReplaySourceFactory::validateStreamKey(info.stream)) {
+        weak_ptr<Session> weak_session = session;
+        auto poller = session->getPoller();
+        auto schema = info.schema;
+        auto vhost = info.vhost;
+        auto stream = info.stream;
+        WorkThreadPool::Instance().getExecutor()->async([weak_session, poller, schema, vhost, stream, run_find]() {
+            string replay_session_stream;
+            createReplaySession(schema, vhost, stream, replay_session_stream);
+            poller->async([weak_session, run_find, replay_session_stream]() {
+                if (!weak_session.lock()) {
+                    // 请求方已断开；已创建的预备 replay 源由工厂自带的延时任务回收
+                    return;
+                }
+                run_find(!replay_session_stream.empty(), replay_session_stream);
+            });
+        });
+        return;
+    }
+#endif
+
+    run_find(false, "");
 }
 
 void MediaSource::findAsync(const MediaInfo &info, const std::shared_ptr<Session> &session, const function<void (const Ptr &)> &cb) {

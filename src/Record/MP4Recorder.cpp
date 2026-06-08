@@ -14,9 +14,18 @@
 #include <dirent.h>
 #include "Util/File.h"
 #include "Common/config.h"
+#include "MP4Recorder.h"
+#include "MP4Demuxer.h"
+#include "RecordFileName.h"
+#include "Thread/WorkThreadPool.h"
+#include "MP4Muxer.h"
 
-namespace {
-std::string getUTCTimeStr(const char *fmt) {
+using namespace std;
+using namespace toolkit;
+
+namespace mediakit {
+
+static string getUTCTimeStr(const char *fmt) {
     auto now = ::time(nullptr);
     struct tm tm = {};
     if (!gmtime_r(&now, &tm)) {
@@ -29,16 +38,6 @@ std::string getUTCTimeStr(const char *fmt) {
     }
     return std::string(buf, len);
 }
-} // namespace
-#include "MP4Recorder.h"
-#include "MP4Demuxer.h"
-#include "Thread/WorkThreadPool.h"
-#include "MP4Muxer.h"
-
-using namespace std;
-using namespace toolkit;
-
-namespace mediakit {
 
 MP4Recorder::MP4Recorder(const MediaTuple &tuple, const string &path, size_t max_second) {
     // ///record 业务逻辑//////  [AUTO-TRANSLATED:2e78931a]
@@ -116,27 +115,17 @@ void MP4Recorder::asyncClose() {
             // 半开区间 [Begin, End)：End = Start + 截断秒数
             // Half-open interval [Begin, End): End = Start + truncated seconds
             time_t end_time = info.start_time + (time_t)(info.time_len);
-            struct tm start_tm = {}, end_tm = {};
-            gmtime_r(&info.start_time, &start_tm);
-            gmtime_r(&end_time, &end_tm);
 
             // 从原始文件名提取 file index（最后一个 '-' 与 '.mp4' 之间的部分）
             // Extract file index from original filename (between last '-' and '.mp4')
-            auto dot_pos = info.file_name.rfind(".mp4");
+            auto dot_pos = info.file_name.rfind(kRecordFileSuffix);
             auto dash_pos = (dot_pos != std::string::npos) ? info.file_name.rfind('-', dot_pos) : std::string::npos;
             std::string index_str = "0";
             if (dash_pos != std::string::npos && dot_pos != std::string::npos) {
                 index_str = info.file_name.substr(dash_pos + 1, dot_pos - dash_pos - 1);
             }
 
-            char new_name[128] = {0};
-            snprintf(new_name, sizeof(new_name),
-                     "%04d-%02d-%02d-%02d-%02d-%02d_%04d-%02d-%02d-%02d-%02d-%02d-%s.mp4",
-                     start_tm.tm_year + 1900, start_tm.tm_mon + 1, start_tm.tm_mday,
-                     start_tm.tm_hour, start_tm.tm_min, start_tm.tm_sec,
-                     end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday,
-                     end_tm.tm_hour, end_tm.tm_min, end_tm.tm_sec,
-                     index_str.c_str());
+            auto new_name = makeRecordFileName(info.start_time, end_time, index_str);
 
             // 用新文件名替换 info 中的路径
             // Replace paths in info with new filename
@@ -235,24 +224,25 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
             continue;
         }
         // 只处理隐藏的 mp4 临时文件
-        if (name[0] != '.' || name.size() <= 5 || name.substr(name.size() - 4) != ".mp4") {
+        if (name[0] != '.' || name.size() <= kRecordFileSuffixLen + 1 ||
+            name.compare(name.size() - kRecordFileSuffixLen, kRecordFileSuffixLen, kRecordFileSuffix) != 0) {
             continue;
         }
 
-        auto base = name.substr(1, name.size() - 5); // 去掉前导 '.' 和末尾 '.mp4'
-        if (base.size() < 19) {
+        auto base = name.substr(1, name.size() - kRecordFileSuffixLen - 1); // 去掉前导 '.' 和末尾 '.mp4'
+        if (base.size() < kRecordTimeStrLen) {
             WarnL << "Orphan file has unexpected name format, deleting: " << path;
             File::delete_file(path);
             continue;
         }
         struct tm start_tm = {};
-        if (!strptime(base.substr(0, 19).c_str(), "%Y-%m-%d-%H-%M-%S", &start_tm)) {
+        if (!strptime(base.substr(0, kRecordTimeStrLen).c_str(), kRecordTimeFormat, &start_tm)) {
             WarnL << "Failed to parse start time from orphan file, deleting: " << path;
             File::delete_file(path);
             continue;
         }
         auto last_dash = base.rfind('-');
-        string index_str = (last_dash != string::npos && last_dash > 18) ? base.substr(last_dash + 1) : "0";
+        string index_str = (last_dash != string::npos && last_dash >= kRecordTimeStrLen) ? base.substr(last_dash + 1) : "0";
 
         try {
             MP4Demuxer demuxer;
@@ -263,18 +253,7 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
             time_t start_time = timegm(&start_tm);
             time_t end_time = start_time + (time_t)(duration_ms / 1000.0);
 
-            struct tm end_tm = {};
-            gmtime_r(&end_time, &end_tm);
-
-            char new_name[128] = {0};
-            snprintf(new_name, sizeof(new_name),
-                     "%04d-%02d-%02d-%02d-%02d-%02d_%04d-%02d-%02d-%02d-%02d-%02d-%s.mp4",
-                     start_tm.tm_year + 1900, start_tm.tm_mon + 1, start_tm.tm_mday,
-                     start_tm.tm_hour, start_tm.tm_min, start_tm.tm_sec,
-                     end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday,
-                     end_tm.tm_hour, end_tm.tm_min, end_tm.tm_sec,
-                     index_str.c_str());
-
+            auto new_name = makeRecordFileName(start_time, end_time, index_str);
             auto new_path = dir + "/" + new_name;
             if (0 == ::rename(path.c_str(), new_path.c_str())) {
                 InfoL << "Recovered orphan recording: " << path << " -> " << new_path;

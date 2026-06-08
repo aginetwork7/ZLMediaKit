@@ -35,7 +35,7 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
     if (catalog._segments.empty()) {
         throw std::runtime_error("replay catalog is empty");
     }
-    if (catalog._windowBeginAtMs >= catalog._windowEndAtMs) {
+    if (catalog._window_begin_at_ms >= catalog._window_end_at_ms) {
         throw std::runtime_error("invalid replay window");
     }
 
@@ -44,9 +44,9 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
     }
 
     _catalog = catalog;
-    _base_file_begin_at_ms = _catalog._segments.front()._beginAtMs;
-    _window_begin_at_ms = _catalog._windowBeginAtMs;
-    _window_end_at_ms = _catalog._windowEndAtMs;
+    _base_file_begin_at_ms = _catalog._segments.front()._begin_at_ms;
+    _window_begin_at_ms = _catalog._window_begin_at_ms;
+    _window_end_at_ms = _catalog._window_end_at_ms;
     _window_begin_offset_ms = absoluteToOffset(_window_begin_at_ms);
     _window_end_offset_ms = absoluteToOffset(_window_end_at_ms);
 
@@ -56,19 +56,19 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
         if (i > 0) {
             file_list.push_back(';');
         }
-        file_list.append(_catalog._segments[i]._filePath);
+        file_list.append(_catalog._segments[i]._file_path);
     }
     _origin_url = file_list;
 
     _poller = poller ? std::move(poller) : WorkThreadPool::Instance().getPoller();
 
    
-    auto replay_window_dur_sec = (_catalog._windowEndAtMs - _catalog._windowBeginAtMs) / 1000.0f;
+    auto replay_window_dur_sec = (_catalog._window_end_at_ms - _catalog._window_begin_at_ms) / 1000.0f;
     _muxer = std::make_shared<MultiMediaSourceMuxer>(tuple, replay_window_dur_sec, option);
     size_t probe_index = 0;
     for (size_t i = 0; i < _catalog._segments.size(); ++i) {
         const auto &seg = _catalog._segments[i];
-        if (_catalog._windowBeginAtMs >= seg._beginAtMs && _catalog._windowBeginAtMs < seg._endAtMs) {
+        if (_catalog._window_begin_at_ms >= seg._begin_at_ms && _catalog._window_begin_at_ms < seg._end_at_ms) {
             probe_index = i;
             break;
         }
@@ -77,8 +77,8 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
     const auto &probe_segment = _catalog._segments[probe_index];
     auto probe_demuxer = std::make_shared<MP4Demuxer>();
     auto probe_open_begin = std::chrono::steady_clock::now();
-    probe_demuxer->openMP4(probe_segment._filePath);
-    _perf_stats._setupProbeOpenMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+    probe_demuxer->openMP4(probe_segment._file_path);
+    _perf_stats._setup_probe_open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - probe_open_begin)
             .count();
 
@@ -109,7 +109,9 @@ uint64_t RtspReplayReader::clampToWindow(uint64_t abs_ms) const {
 
 void RtspReplayReader::onStarted(uint64_t actual_at_ms) {
     if (_started) {
-        throw std::runtime_error("replay session origin already set");
+        // Should never happen; guard instead of re-anchoring the already-started timeline.
+        WarnL << "replay timeline already started, ignore duplicate onStarted";
+        return;
     }
     _current_at_ms = clampToWindow(actual_at_ms);
     _started = true;
@@ -117,21 +119,24 @@ void RtspReplayReader::onStarted(uint64_t actual_at_ms) {
 
 void RtspReplayReader::onProgressed(uint64_t actual_at_ms) {
     if (!_started) {
-        throw std::runtime_error("replay timeline not started");
+        WarnL << "replay timeline not started, ignore onProgressed";
+        return;
     }
     _current_at_ms = clampToWindow(actual_at_ms);
 }
 
 void RtspReplayReader::onSeekCompleted(uint64_t actual_at_ms) {
     if (!_started) {
-        throw std::runtime_error("replay timeline not started");
+        WarnL << "replay timeline not started, ignore onSeekCompleted";
+        return;
     }
     _current_at_ms = clampToWindow(actual_at_ms);
 }
 
 uint64_t RtspReplayReader::resolvePlayTargetFromNpt(uint32_t npt_ms) const {
     if (!_started) {
-        throw std::runtime_error("replay timeline not started");
+        WarnL << "replay timeline not started, clamp seek target to window begin";
+        return _window_begin_at_ms;
     }
     auto target = _window_begin_at_ms + npt_ms;
     return clampToWindow(target);
@@ -156,15 +161,15 @@ bool RtspReplayReader::start(uint64_t sample_ms, bool ref_self, bool file_repeat
     }
 
     auto start_begin = std::chrono::steady_clock::now();
-    int64_t _demuxOpenMs = 0;
-    int64_t _primeTrackMs = 0;
+    int64_t demux_open_ms = 0;
+    int64_t prime_track_ms = 0;
 
     if (!_demuxer) {
         auto demux_open_begin = std::chrono::steady_clock::now();
         if (!openSegmentByOffset((uint32_t)_window_begin_offset_ms)) {
             return false;
         }
-        _demuxOpenMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - demux_open_begin).count();
+        demux_open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - demux_open_begin).count();
     }
 
     auto strong_self = shared_from_this();
@@ -175,7 +180,6 @@ bool RtspReplayReader::start(uint64_t sample_ms, bool ref_self, bool file_repeat
     // the large file-offset stamp, and the paced sender baselines on that big value,
     // forcing a dts-decrease cache flush once the first playback frame arrives.
     _paused = false;
-    _session_origin_offset_ms = absoluteToOffset(_window_begin_at_ms);
     onStarted(offsetToAbsolute(getCurrentOffset()));
 
     if (_muxer) {
@@ -183,7 +187,7 @@ bool RtspReplayReader::start(uint64_t sample_ms, bool ref_self, bool file_repeat
         while (!_muxer->isAllTrackReady() && readNextSample()) {
             // keep priming until tracks are ready
         }
-        _primeTrackMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - prime_track_begin).count();
+        prime_track_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - prime_track_begin).count();
         _muxer->setMediaListener(strong_self);
     }
 
@@ -194,10 +198,10 @@ bool RtspReplayReader::start(uint64_t sample_ms, bool ref_self, bool file_repeat
         _muxer->setTimeStamp(0);
     }
 
-    auto _startTotalMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_begin).count();
-    _perf_stats._startTotalMs = _startTotalMs;
-    _perf_stats._demuxOpenMs = _demuxOpenMs;
-    _perf_stats._primeTrackMs = _primeTrackMs;
+    auto start_total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_begin).count();
+    _perf_stats._start_total_ms = start_total_ms;
+    _perf_stats._demux_open_ms = demux_open_ms;
+    _perf_stats._prime_track_ms = prime_track_ms;
 
     _file_repeat = file_repeat;
     GET_CONFIG(uint32_t, sampleMS, Record::kSampleMS);
@@ -230,20 +234,6 @@ const RtspReplayReader::PerfStats &RtspReplayReader::getPerfStats() const {
     return _perf_stats;
 }
 
-uint64_t RtspReplayReader::firstPlayableAt() const {
-    if (_started) {
-        return _window_begin_at_ms;
-    }
-    return offsetToAbsolute((uint32_t)_window_begin_offset_ms);
-}
-
-uint64_t RtspReplayReader::currentAt() const {
-    if (_started) {
-        return _current_at_ms;
-    }
-    return offsetToAbsolute(getCurrentOffset());
-}
-
 
 bool RtspReplayReader::readSample() {
     if (_paused) {
@@ -257,7 +247,9 @@ bool RtspReplayReader::readSample() {
     while (!eof && _last_dts < cur_offset) {
         auto frame = readFrameWithSegmentSwitch(keyFrame, eof);
         if (!frame) {
-            continue;
+            // No frame available this tick (transient demuxer miss or eof). Position has not
+            // advanced, so re-looping would spin on _mtx; bail out and retry next timer tick.
+            break;
         }
         _last_dts = frame->dts();
         if (_window_end_offset_ms > 0 && _last_dts >= _window_end_offset_ms) {
@@ -323,7 +315,7 @@ bool RtspReplayReader::openSegmentByIndex(size_t segment_index, uint64_t local_s
 
     const auto &segment = _catalog._segments[segment_index];
     auto demuxer = std::make_shared<MP4Demuxer>();
-    demuxer->openMP4(segment._filePath);
+    demuxer->openMP4(segment._file_path);
 
     auto duration_ms = demuxer->getDurationMS();
     auto seek_ms = local_seek_ms;
@@ -339,19 +331,19 @@ bool RtspReplayReader::openSegmentByIndex(size_t segment_index, uint64_t local_s
 
     _demuxer = std::move(demuxer);
     _active_segment_index = segment_index;
-    _active_segment_begin_offset_ms = absoluteToOffset(segment._beginAtMs);
-    _active_segment_end_offset_ms = absoluteToOffset(segment._endAtMs);
+    _active_segment_begin_offset_ms = absoluteToOffset(segment._begin_at_ms);
+    _active_segment_end_offset_ms = absoluteToOffset(segment._end_at_ms);
     return true;
 }
 
 size_t RtspReplayReader::locateSegmentByAbsolute(uint64_t abs_ms) const {
     for (size_t i = 0; i < _catalog._segments.size(); ++i) {
         const auto &segment = _catalog._segments[i];
-        if (abs_ms < segment._beginAtMs) {
+        if (abs_ms < segment._begin_at_ms) {
             // Target hits a gap, return the first segment after the gap.
             return i;
         }
-        if (abs_ms < segment._endAtMs) {
+        if (abs_ms < segment._end_at_ms) {
             return i;
         }
     }
@@ -367,8 +359,8 @@ bool RtspReplayReader::openSegmentByOffset(uint32_t target_offset_ms) {
 
     const auto &segment = _catalog._segments[segment_index];
     uint64_t local_seek_ms = 0;
-    if (target_abs_ms > segment._beginAtMs) {
-        local_seek_ms = target_abs_ms - segment._beginAtMs;
+    if (target_abs_ms > segment._begin_at_ms) {
+        local_seek_ms = target_abs_ms - segment._begin_at_ms;
     }
     return openSegmentByIndex(segment_index, local_seek_ms);
 }
@@ -407,7 +399,7 @@ Frame::Ptr RtspReplayReader::readFrameWithSegmentSwitch(bool &keyFrame, bool &eo
         auto next_segment_index = _active_segment_index + 1;
         while (next_segment_index < _catalog._segments.size()) {
             const auto &next_segment = _catalog._segments[next_segment_index];
-            if (_window_end_offset_ms > 0 && absoluteToOffset(next_segment._beginAtMs) >= _window_end_offset_ms) {
+            if (_window_end_offset_ms > 0 && absoluteToOffset(next_segment._begin_at_ms) >= _window_end_offset_ms) {
                 eof = true;
                 return nullptr;
             }
@@ -468,15 +460,15 @@ bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms, bool allow_tail_fal
     }
 
     const auto &target_segment = _catalog._segments[target_segment_index];
-    auto target_in_segment = target_abs_ms >= target_segment._beginAtMs && target_abs_ms < target_segment._endAtMs;
+    auto target_in_segment = target_abs_ms >= target_segment._begin_at_ms && target_abs_ms < target_segment._end_at_ms;
 
     size_t segment_index = target_segment_index;
     while (segment_index < _catalog._segments.size()) {
         const auto &segment = _catalog._segments[segment_index];
         auto prefer_before_target = segment_index == target_segment_index && target_in_segment;
         uint64_t local_target_ms = 0;
-        if (segment_index == target_segment_index && target_abs_ms > segment._beginAtMs) {
-            local_target_ms = target_abs_ms - segment._beginAtMs;
+        if (segment_index == target_segment_index && target_abs_ms > segment._begin_at_ms) {
+            local_target_ms = target_abs_ms - segment._begin_at_ms;
         }
 
         auto need_reopen = reopen_demux || !_demuxer || _active_segment_index != segment_index;
@@ -525,7 +517,7 @@ bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms, bool allow_tail_fal
                     // requested seek position. For hole-forward hits the playable frame is later
                     // than the request, and for in-segment hits the nearest key frame may be
                     // earlier; baselining on the request causes a dts-decrease cache flush (visible stall).
-                    auto npt_actual = global_dts > _session_origin_offset_ms ? (global_dts - _session_origin_offset_ms) : 0;
+                    auto npt_actual = offsetToSessionNpt(global_dts);
                     _muxer->resetPacedSender((uint32_t)npt_actual);
                 }
                 _muxer->inputFrame(remapFrameToSessionNpt(stamped));
@@ -550,7 +542,7 @@ bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms, bool allow_tail_fal
 
     WarnL << "replay seek fallback without playable frame, target_abs_ms=" << target_abs_ms;
     if (_muxer && _started) {
-        auto npt_seek = target_seek > _session_origin_offset_ms ? (target_seek - _session_origin_offset_ms) : 0;
+        auto npt_seek = offsetToSessionNpt(target_seek);
         _muxer->resetPacedSender((uint32_t)npt_seek);
     }
     setCurrentOffset((uint32_t)target_seek, true);
@@ -572,16 +564,17 @@ uint64_t RtspReplayReader::offsetToAbsolute(uint32_t offset_ms) const {
     return _base_file_begin_at_ms + offset_ms;
 }
 
+uint64_t RtspReplayReader::offsetToSessionNpt(uint64_t offset_ms) const {
+    return offset_ms > _window_begin_offset_ms ? (offset_ms - _window_begin_offset_ms) : 0;
+}
+
 Frame::Ptr RtspReplayReader::remapFrameToSessionNpt(const Frame::Ptr &frame) const {
     if (!frame || !_started) {
         return frame;
     }
 
-    auto dts = (int64_t)frame->dts() - (int64_t)_session_origin_offset_ms;
-    auto pts = (int64_t)frame->pts() - (int64_t)_session_origin_offset_ms;
-    if (dts < 0) {
-        dts = 0;
-    }
+    auto dts = (int64_t)offsetToSessionNpt(frame->dts());
+    auto pts = (int64_t)offsetToSessionNpt(frame->pts());
     if (pts < dts) {
         pts = dts;
     }

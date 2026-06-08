@@ -26,10 +26,10 @@ public:
     using Ptr = std::shared_ptr<RtspReplayReader>;
 
     struct PerfStats {
-        int64_t _setupProbeOpenMs = 0;
-        int64_t _startTotalMs = 0;
-        int64_t _demuxOpenMs = 0;
-        int64_t _primeTrackMs = 0;
+        int64_t _setup_probe_open_ms = 0;
+        int64_t _start_total_ms = 0;
+        int64_t _demux_open_ms = 0;
+        int64_t _prime_track_ms = 0;
     };
 
     RtspReplayReader(const MediaTuple &tuple, const RtspReplayCatalogResult &catalog, const ProtocolOption &option, toolkit::EventPoller::Ptr poller = nullptr);
@@ -37,9 +37,6 @@ public:
     bool start(uint64_t sample_ms = 0, bool ref_self = true, bool file_repeat = false);
     void stop();
     const PerfStats &getPerfStats() const;
-
-    uint64_t firstPlayableAt() const;
-    uint64_t currentAt() const;
 
 private:
     bool seekTo(MediaSource &sender, uint32_t stamp) override;
@@ -65,6 +62,8 @@ private:
 
     uint32_t absoluteToOffset(uint64_t abs_ms) const;
     uint64_t offsetToAbsolute(uint32_t offset_ms) const;
+    // Convert a file-relative offset(ms) to the 0-based session NPT(ms), clamped at 0.
+    uint64_t offsetToSessionNpt(uint64_t offset_ms) const;
     Frame::Ptr remapFrameToSessionNpt(const Frame::Ptr &frame) const;
 
     uint64_t clampToWindow(uint64_t abs_ms) const;
@@ -87,10 +86,9 @@ private:
     uint64_t _base_file_begin_at_ms = 0;
     uint64_t _window_begin_at_ms = 0;
     uint64_t _window_end_at_ms = 0;
-    uint64_t _window_begin_offset_ms = 0; // window_begin offset relative to the file start time 
+    uint64_t _window_begin_offset_ms = 0; // window_begin offset relative to the file start time (also the session NPT origin)
     uint64_t _window_end_offset_ms = 0; // window_end offset relative to the file start time
     uint64_t _current_at_ms = 0;
-    uint64_t _session_origin_offset_ms = 0;
     uint64_t _active_segment_begin_offset_ms = 0;
     uint64_t _active_segment_end_offset_ms = 0;
     size_t _active_segment_index = 0;

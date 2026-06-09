@@ -30,30 +30,25 @@ using namespace toolkit;
 
 namespace mediakit {
 
-static constexpr uint64_t kRtspAuthFileCheckIntervalMs = 5 * 60 * 1000;
-
 struct RtspAuthFileCache {
     string path;
     string username;
     string password;
     time_t mtime = 0;
-    uint64_t last_check_ms = 0;
+    off_t size = -1;
     bool loaded = false;
 };
 
 static RtspAuthFileCache g_rtspAuthFileCache;
 static recursive_mutex g_mtxRtspAuthFileCache;
 
-static uint64_t getCurrentTickMs() {
-    return chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now().time_since_epoch()).count();
-}
-
-static bool getFileMTime(const string &path, time_t &mtime) {
+static bool getFileStat(const string &path, time_t &mtime, off_t &size) {
     struct stat st = {0};
     if (::stat(path.c_str(), &st) != 0) {
         return false;
     }
     mtime = st.st_mtime;
+    size = st.st_size;
     return true;
 }
 
@@ -68,16 +63,10 @@ static bool loadRtspAuthFile(const string &path, string &username, string &passw
     lock_guard<recursive_mutex> lock(g_mtxRtspAuthFileCache);
     auto &cache = g_rtspAuthFileCache;
     auto same_path = cache.loaded && cache.path == path;
-    auto now_ms = getCurrentTickMs();
-    if (same_path && now_ms - cache.last_check_ms < kRtspAuthFileCheckIntervalMs) {
-        username = cache.username;
-        password = cache.password;
-        return true;
-    }
-    cache.last_check_ms = now_ms;
 
     time_t mtime = 0;
-    if (!getFileMTime(path, mtime)) {
+    off_t size = -1;
+    if (!getFileStat(path, mtime, size)) {
         if (same_path) {
             WarnL << "rtsp authFile stat failed, keep cached credentials: " << path;
             username = cache.username;
@@ -88,7 +77,7 @@ static bool loadRtspAuthFile(const string &path, string &username, string &passw
         return false;
     }
 
-    if (same_path && cache.mtime == mtime) {
+    if (same_path && cache.mtime == mtime && cache.size == size) {
         username = cache.username;
         password = cache.password;
         return true;
@@ -135,6 +124,7 @@ static bool loadRtspAuthFile(const string &path, string &username, string &passw
     cache.username = std::move(new_username);
     cache.password = std::move(new_password);
     cache.mtime = mtime;
+    cache.size = size;
     cache.loaded = true;
     username = cache.username;
     password = cache.password;
@@ -201,7 +191,7 @@ static string sha256Hex(const string &input) {
 
 // 真实 active 播放会话配额：only 进入 PLAY 的会话才计数（DESCRIBE/SETUP 不算）。
 // g_play_total 为 live+replay 总数，replay 另受 g_play_replay 约束；0 表示不限制。
-// 两个计数需原子事务（replay 要同时满足两个上限），故用一把轻量锁保护。
+// 两个计数需原子事务（replay 要同时满足两个上限）
 static std::mutex g_mtxPlayQuota;
 static size_t g_play_total = 0;
 static size_t g_play_replay = 0;

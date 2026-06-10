@@ -153,7 +153,7 @@ uint32_t RtspReplayReader::currentNptMs() const {
     return static_cast<uint32_t>(delta);
 }
 
-bool RtspReplayReader::start(uint64_t sample_ms, bool ref_self, bool file_repeat) {
+bool RtspReplayReader::start() {
     lock_guard<recursive_mutex> lck(_mtx);
 
     if (_timer) {
@@ -203,25 +203,14 @@ bool RtspReplayReader::start(uint64_t sample_ms, bool ref_self, bool file_repeat
     _perf_stats._demux_open_ms = demux_open_ms;
     _perf_stats._prime_track_ms = prime_track_ms;
 
-    _file_repeat = file_repeat;
     GET_CONFIG(uint32_t, sampleMS, Record::kSampleMS);
-    auto timer_sec = (sample_ms ? sample_ms : sampleMS) / 1000.0f;
-    if (ref_self) {
-        _timer = std::make_shared<Timer>(timer_sec, [strong_self]() {
-            lock_guard<recursive_mutex> lck(strong_self->_mtx);
-            return strong_self->readSample();
-        }, _poller);
-    } else {
-        weak_ptr<RtspReplayReader> weak_self = strong_self;
-        _timer = std::make_shared<Timer>(timer_sec, [weak_self]() {
-            auto strong_self_2 = weak_self.lock();
-            if (!strong_self_2) {
-                return false;
-            }
-            lock_guard<recursive_mutex> lck(strong_self_2->_mtx);
-            return strong_self_2->readSample();
-        }, _poller);
-    }
+    auto timer_sec = sampleMS / 1000.0f;
+
+    _timer = std::make_shared<Timer>(timer_sec, [strong_self]() {
+        lock_guard<recursive_mutex> lck(strong_self->_mtx);
+        return strong_self->readSample();
+    }, _poller);
+
     return true;
 }
 
@@ -272,7 +261,7 @@ bool RtspReplayReader::readSample() {
             }
         }
         if (_muxer) {
-            _muxer->inputFrame(remapFrameToSessionNpt(frame));
+            _muxer->inputFrame(remapFrameToSessionNpt(frame));                                                                                                                                  
         }
     }
 
@@ -288,8 +277,11 @@ bool RtspReplayReader::readSample() {
     }
 
     GET_CONFIG(bool, file_repeat, Record::kFileRepeat);
-    if (eof && (file_repeat || _file_repeat)) {
+    if (eof && (file_repeat)) {
         return seekToOffset((uint32_t)_window_begin_offset_ms);
+    }
+    if(eof){
+        _timer = nullptr;
     }
     return !eof;
 }
@@ -595,7 +587,7 @@ bool RtspReplayReader::seekTo(MediaSource &sender, uint32_t stamp) {
     lock_guard<recursive_mutex> lck(_mtx);
 
     if (!_started) {
-        if (!start(0, true, false)) {
+        if (!start()) {
             return false;
         }
     }
@@ -615,7 +607,7 @@ bool RtspReplayReader::pause(MediaSource &sender, bool pause_value) {
     lock_guard<recursive_mutex> lck(_mtx);
 
     if (!_started) {
-        if (!start(0, true, false)) {
+        if (!start()) {
             return false;
         }
     }
@@ -633,7 +625,7 @@ bool RtspReplayReader::speed(MediaSource &sender, float speed_value) {
     lock_guard<recursive_mutex> lck(_mtx);
 
     if (!_started) {
-        if (!start(0, true, false)) {
+        if (!start()) {
             return false;
         }
     }

@@ -88,7 +88,7 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
         auto reader_setup_begin = std::chrono::steady_clock::now();
         auto reader = std::make_shared<RtspReplayReader>(tuple, catalog, option);
         auto reader_setup_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - reader_setup_begin).count();
-        if (!reader->start(0, true, false)) {
+        if (!reader->start()) {
             throw std::runtime_error("failed to start replay reader");
         }
         const auto &reader_perf = reader->getPerfStats();

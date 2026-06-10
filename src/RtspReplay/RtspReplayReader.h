@@ -34,7 +34,7 @@ public:
 
     RtspReplayReader(const MediaTuple &tuple, const RtspReplayCatalogResult &catalog, const ProtocolOption &option, toolkit::EventPoller::Ptr poller = nullptr);
 
-    bool start(uint64_t sample_ms = 0, bool ref_self = true, bool file_repeat = false);
+    bool start();
     void stop();
     const PerfStats &getPerfStats() const;
 
@@ -74,7 +74,6 @@ private:
     uint32_t currentNptMs() const;
 
 private:
-    bool _file_repeat = false;
     bool _have_video = false;
     bool _paused = false;
     bool _started = false;

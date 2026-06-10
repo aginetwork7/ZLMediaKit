@@ -107,13 +107,20 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
         GET_CONFIG(int, max_wait_ms, General::kMaxStreamWaitTimeMS);
         auto cleanup_delay_ms = max_wait_ms + 5000;
         auto replay_app_name = replay_app;
-        WorkThreadPool::Instance().getPoller()->doDelayTask(cleanup_delay_ms, [schema, vhost, replay_app_name, session_stream, listener_tag, released]() {
+        std::weak_ptr<RtspReplayReader> weak_reader = reader;
+        WorkThreadPool::Instance().getPoller()->doDelayTask(cleanup_delay_ms, [schema, vhost, replay_app_name, session_stream, listener_tag, released, weak_reader]() {
             auto src = MediaSource::find(schema, vhost, replay_app_name, session_stream, false);
             if (src) {
                 // Source is registered and still active.
                 return 0;
             }
             WarnL << "replay: cleanup inactive prepared session, stream=" << session_stream;
+            // Break the reader's timer self-reference so the reader/muxer are released even if
+            // it was never taken over by a player (defensive; the no-viewer auto-close usually
+            // already handled it).
+            if (auto reader = weak_reader.lock()) {
+                reader->stop();
+            }
             releaseReplaySession(session_stream, listener_tag, released);
             return 0;
         });

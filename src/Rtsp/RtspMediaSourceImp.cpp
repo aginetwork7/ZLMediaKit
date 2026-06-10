@@ -54,7 +54,7 @@ void RtspMediaSource::onWrite(RtpPacket::Ptr rtp, bool keyPos) {
     assert(rtp->type >= 0 && rtp->type < TrackMax);
     auto &track = _tracks[rtp->type];
     auto stamp = rtp->getStampMS();
-    auto track_stamp = rtp->getStamp() * uint64_t(1000) / rtp->sample_rate;
+    auto track_stamp = rtp->sample_rate ? (rtp->getStamp() * uint64_t(1000) / rtp->sample_rate) : 0;
     if (rtp->ntp_stamp > 0 && rtp->ntp_stamp <= UINT32_MAX) {
         // replay场景会把会话NPT(ms)放在ntp_stamp中，优先使用以避免32位RTP时间戳回绕。
         track_stamp = rtp->ntp_stamp;

@@ -58,7 +58,7 @@ private:
 
     uint32_t getCurrentOffset() const;
     void setCurrentOffset(uint32_t offset_ms, bool sync_timeline);
-    bool seekToOffset(uint32_t offset_seek_ms, bool allow_tail_fallback, bool reopen_demux = true);
+    bool seekToOffset(uint32_t offset_seek_ms);
 
     uint32_t absoluteToOffset(uint64_t abs_ms) const;
     uint64_t offsetToAbsolute(uint32_t offset_ms) const;

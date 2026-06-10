@@ -126,7 +126,7 @@ void RtspMuxer::onRtp(RtpPacket::Ptr in, bool is_key) {
     } else {
         if (_rtp_ext_time_base_ms == 0) {
             // 非replay点播沿用原有逻辑。replay下保留编码阶段写入的64位NPT(ms)，避免32位RTP时间戳回绕。
-            in->ntp_stamp = _ntp_stamp_start + (in->getStamp() * uint64_t(1000) / in->sample_rate);
+            in->ntp_stamp = _ntp_stamp_start + (in->sample_rate ? (in->getStamp() * uint64_t(1000) / in->sample_rate) : 0);
         }
     }
 

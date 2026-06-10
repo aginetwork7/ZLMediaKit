@@ -1632,7 +1632,7 @@ void RtspSession::sendRtpPacket(const RtspMediaSource::RingDataType &pkt) {
             pkt->for_each([&](const RtpPacket::Ptr &rtp) {
                 if (_target_play_track == TrackInvalid || _target_play_track == rtp->type) {
                     if (_seek_probe_pending) {
-                        auto rtp_ms = rtp->getStamp() * uint64_t(1000) / rtp->sample_rate;
+                        auto rtp_ms = rtp->sample_rate ? (rtp->getStamp() * uint64_t(1000) / rtp->sample_rate) : 0;
                         InfoP(this) << "rtsp seek probe first RTP(tcp):"
                                     << " req_ms=" << _seek_probe_req_ms
                                     << ", actual_ms=" << _seek_probe_actual_ms
@@ -1657,7 +1657,7 @@ void RtspSession::sendRtpPacket(const RtspMediaSource::RingDataType &pkt) {
             pkt->for_each([&](const RtpPacket::Ptr &rtp) {
                 if (_target_play_track == TrackInvalid || _target_play_track == rtp->type) {
                     if (_seek_probe_pending) {
-                        auto rtp_ms = rtp->getStamp() * uint64_t(1000) / rtp->sample_rate;
+                        auto rtp_ms = rtp->sample_rate ? (rtp->getStamp() * uint64_t(1000) / rtp->sample_rate) : 0;
                         InfoP(this) << "rtsp seek probe first RTP(udp):"
                                     << " req_ms=" << _seek_probe_req_ms
                                     << ", actual_ms=" << _seek_probe_actual_ms

@@ -289,7 +289,7 @@ bool RtspReplayReader::readSample() {
 
     GET_CONFIG(bool, file_repeat, Record::kFileRepeat);
     if (eof && (file_repeat || _file_repeat)) {
-        return seekToOffset((uint32_t)_window_begin_offset_ms, true, true);
+        return seekToOffset((uint32_t)_window_begin_offset_ms);
     }
     return !eof;
 }
@@ -315,7 +315,14 @@ bool RtspReplayReader::openSegmentByIndex(size_t segment_index, uint64_t local_s
 
     const auto &segment = _catalog._segments[segment_index];
     auto demuxer = std::make_shared<MP4Demuxer>();
-    demuxer->openMP4(segment._file_path);
+    try {
+        demuxer->openMP4(segment._file_path);
+    } catch (std::exception &ex) {
+        // A corrupted/unreadable segment must not crash the timer thread; return false so the
+        // caller skips it and advances to the next segment.
+        WarnL << "replay: failed to open MP4 segment: " << segment._file_path << ", err: " << ex.what();
+        return false;
+    }
 
     auto duration_ms = demuxer->getDurationMS();
     auto seek_ms = local_seek_ms;
@@ -444,7 +451,7 @@ void RtspReplayReader::setCurrentOffset(uint32_t offset_ms, bool sync_timeline) 
     }
 }
 
-bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms, bool allow_tail_fallback, bool reopen_demux) {
+bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms) {
     uint64_t target_seek = offset_seek_ms;
     if (target_seek < _window_begin_offset_ms) {
         target_seek = _window_begin_offset_ms;
@@ -456,7 +463,12 @@ bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms, bool allow_tail_fal
     auto target_abs_ms = offsetToAbsolute((uint32_t)target_seek);
     auto target_segment_index = locateSegmentByAbsolute(target_abs_ms);
     if (target_segment_index >= _catalog._segments.size()) {
-        return false;
+        WarnL << "replay seek beyond last segment, tail fallback, target_abs_ms=" << target_abs_ms;
+        if (_muxer && _started) {
+            _muxer->resetPacedSender((uint32_t)offsetToSessionNpt(target_seek));
+        }
+        setCurrentOffset((uint32_t)target_seek, true);
+        return true;
     }
 
     const auto &target_segment = _catalog._segments[target_segment_index];
@@ -471,16 +483,16 @@ bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms, bool allow_tail_fal
             local_target_ms = target_abs_ms - segment._begin_at_ms;
         }
 
-        auto need_reopen = reopen_demux || !_demuxer || _active_segment_index != segment_index;
+        // Only reopen the demuxer when we must: no demuxer yet, or the target lies in a
+        // different segment than the one currently open. Otherwise reuse it and seek in place.
+        auto need_reopen = !_demuxer || _active_segment_index != segment_index;
         if (need_reopen && !openSegmentByIndex(segment_index, local_target_ms)) {
             ++segment_index;
-            reopen_demux = true;
             continue;
         }
 
         if (!need_reopen && _demuxer->seekTo((int64_t)local_target_ms) == -1) {
             ++segment_index;
-            reopen_demux = true;
             continue;
         }
 
@@ -533,11 +545,6 @@ bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms, bool allow_tail_fal
         }
 
         ++segment_index;
-        reopen_demux = true;
-    }
-
-    if (!allow_tail_fallback) {
-        return false;
     }
 
     WarnL << "replay seek fallback without playable frame, target_abs_ms=" << target_abs_ms;
@@ -601,7 +608,7 @@ bool RtspReplayReader::seekTo(MediaSource &sender, uint32_t stamp) {
     auto target_abs = resolvePlayTargetFromNpt(stamp);
     auto target_offset = absoluteToOffset(target_abs);
     TraceL << getOriginUrl(sender) << ",npt_ms:" << stamp << ",target_abs:" << target_abs << ",target_offset:" << target_offset;
-    return seekToOffset(target_offset, true);
+    return seekToOffset(target_offset);
 }
 
 bool RtspReplayReader::pause(MediaSource &sender, bool pause_value) {

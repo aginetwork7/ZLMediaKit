@@ -4,7 +4,7 @@ ARG MODEL=Release
 #rtsp,http
 EXPOSE 554/tcp
 EXPOSE 8089/tcp
-
+EXPOSE 8449/tcp
 # ADD sources.list /etc/apt/sources.list
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \

@@ -54,6 +54,7 @@
 #endif
 
 #ifdef ENABLE_WEBRTC
+#include "../webrtc/MultiSourceWebRtcPusher/BatchPublishSessionManager.h"
 #include "../webrtc/WebRtcPlayer.h"
 #include "../webrtc/WebRtcPusher.h"
 #include "../webrtc/WebRtcEchoTest.h"
@@ -2162,6 +2163,11 @@ void installWebApi() {
     static auto whip_whep_func = [](const char *type, API_ARGS_STRING_ASYNC) {
         auto offer = allArgs.args;
         CHECK(!offer.empty(), "http body(webrtc offer sdp) is empty");
+        if (!strcasecmp(type, "push_batch")) {
+            CHECK_ARGS("streamCount");
+            auto stream_count = atoi(allArgs["streamCount"].data());
+            CHECK(stream_count > 0, "streamCount invalid");
+        }
 
         auto &session = static_cast<Session&>(sender);
         auto location = std::string(session.overSsl() ? "https://" : "http://") + allArgs["host"] + delete_webrtc_url;
@@ -2183,6 +2189,26 @@ void installWebApi() {
 
     api_regist("/index/api/whip", [](API_ARGS_STRING_ASYNC) { whip_whep_func("push", API_ARGS_VALUE, invoker); });
     api_regist("/index/api/whep", [](API_ARGS_STRING_ASYNC) { whip_whep_func("play", API_ARGS_VALUE, invoker); });
+    api_regist("/index/api/whipBatch", [](API_ARGS_STRING_ASYNC) { whip_whep_func("push_batch", API_ARGS_VALUE, invoker); });
+
+    api_regist("/index/api/whipBatchInfo", [](API_ARGS_MAP) {
+        CHECK_SECRET();
+        CHECK_ARGS("app", "stream");
+
+        val["data"] = BatchPublishSessionManager::Instance().getSessionInfo(allArgs["app"], allArgs["stream"]);
+    });
+
+    api_regist("/index/api/getWhepViewerCount", [](API_ARGS_MAP) {
+        CHECK_SECRET();
+        CHECK_ARGS("app", "stream");
+
+        Json::Value data;
+        data["app"] = allArgs["app"];
+        data["stream"] = allArgs["stream"];
+        auto src = MediaSource::find(RTSP_SCHEMA, DEFAULT_VHOST, allArgs["app"], allArgs["stream"]);
+        data["whepViewerCount"] = src ? src->totalReaderCount() : 0;
+        val["data"] = std::move(data);
+    });
 
     api_regist(delete_webrtc_url, [](API_ARGS_MAP_ASYNC) {
         CHECK_ARGS("id", "token");

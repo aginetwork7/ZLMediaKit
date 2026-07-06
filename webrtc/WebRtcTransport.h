@@ -177,6 +177,8 @@ public:
     void setOnStartWebRTC(std::function<void()> on_start);
 
 protected:
+    virtual bool enableDatachannelEcho() const { return true; }
+
     // DtlsTransport::Listener; dtls相关的回调
     void OnDtlsTransportConnecting(const RTC::DtlsTransport *dtlsTransport) override;
     void OnDtlsTransportConnected(const RTC::DtlsTransport *dtlsTransport,
@@ -397,6 +399,8 @@ private:
     // 根据接收rtp的pt获取相关信息  [AUTO-TRANSLATED:39e56d7d]
     // Get relevant information based on the pt of the received rtp
     std::unordered_map<uint8_t/*pt*/, std::unique_ptr<WrappedMediaTrack>> _pt_to_track;
+    // 根据接收rtp的ssrc获取更精确的track映射，适配多m-line同pt场景
+    std::unordered_map<uint32_t/*ssrc*/, std::unique_ptr<WrappedMediaTrack>> _ssrc_to_wrapped_track;
     std::vector<SdpAttrCandidate> _cands;
     // http访问时的host ip  [AUTO-TRANSLATED:e8fe6957]
     // Host ip for http access

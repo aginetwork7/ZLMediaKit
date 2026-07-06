@@ -26,6 +26,7 @@
 #include "WebRtcTransport.h"
 
 #include "WebRtcEchoTest.h"
+#include "MultiSourceWebRtcPusher/MultiSourceWebRtcPusher.h"
 #include "WebRtcPlayer.h"
 #include "WebRtcPusher.h"
 #include "WebRtcTalk.h"
@@ -554,7 +555,7 @@ void WebRtcTransport::OnSctpAssociationMessageReceived(
     params.streamId = streamId;
 
     GET_CONFIG(bool, datachannel_echo, Rtc::kDataChannelEcho);
-    if (datachannel_echo) {
+    if (datachannel_echo && enableDatachannelEcho()) {
         // 回显数据  [AUTO-TRANSLATED:7868d3a4]
         // Echo data
         _sctp->SendSctpMessage(params, ppid, msg, len);
@@ -892,11 +893,35 @@ bool WebRtcTransportImp::canRecvRtp() const {
 void WebRtcTransportImp::onStartWebRTC() {
     // 获取ssrc和pt相关信息,届时收到rtp和rtcp时分别可以根据pt和ssrc找到相关的信息  [AUTO-TRANSLATED:39828247]
     // Get ssrc and pt related information, so that when receiving rtp and rtcp, you can find the relevant information according to pt and ssrc respectively
+    vector<const RtcMedia *> offer_audio_list;
+    vector<const RtcMedia *> offer_video_list;
+    offer_audio_list.reserve(_offer_sdp->media.size());
+    offer_video_list.reserve(_offer_sdp->media.size());
+    for (auto &m_offer : _offer_sdp->media) {
+        if (m_offer.type == TrackAudio) {
+            offer_audio_list.emplace_back(&m_offer);
+        } else if (m_offer.type == TrackVideo) {
+            offer_video_list.emplace_back(&m_offer);
+        }
+    }
+
+    size_t offer_audio_index = 0;
+    size_t offer_video_index = 0;
+
     for (auto &m_answer : _answer_sdp->media) {
         if (m_answer.type == TrackApplication) {
             continue;
         }
-        auto m_offer = _offer_sdp->getMedia(m_answer.type);
+
+        const RtcMedia *m_offer = nullptr;
+        if (m_answer.type == TrackAudio) {
+            CHECK(offer_audio_index < offer_audio_list.size(), "audio m-line count mismatch between offer/answer");
+            m_offer = offer_audio_list[offer_audio_index++];
+        } else {
+            CHECK(offer_video_index < offer_video_list.size(), "video m-line count mismatch between offer/answer");
+            m_offer = offer_video_list[offer_video_index++];
+        }
+
         auto track = std::make_shared<MediaTrack>();
 
         track->media = &m_answer;
@@ -925,9 +950,15 @@ void WebRtcTransportImp::onStartWebRTC() {
         // rtp pt --> MediaTrack
         _pt_to_track.emplace(
             track->plan_rtp->pt, std::unique_ptr<WrappedMediaTrack>(new WrappedRtpTrack(track, _twcc_ctx, *this)));
+        if (track->offer_ssrc_rtp) {
+            _ssrc_to_wrapped_track[track->offer_ssrc_rtp] = std::unique_ptr<WrappedMediaTrack>(new WrappedRtpTrack(track, _twcc_ctx, *this));
+        }
         if (track->plan_rtx) {
             // rtx pt --> MediaTrack
             _pt_to_track.emplace(track->plan_rtx->pt, std::unique_ptr<WrappedMediaTrack>(new WrappedRtxTrack(track)));
+            if (track->offer_ssrc_rtx) {
+                _ssrc_to_wrapped_track[track->offer_ssrc_rtx] = std::unique_ptr<WrappedMediaTrack>(new WrappedRtxTrack(track));
+            }
         }
         // 记录rtp ext类型与id的关系，方便接收或发送rtp时修改rtp ext id  [AUTO-TRANSLATED:5736bd34]
         // Record the relationship between rtp ext type and id, which is convenient for modifying rtp ext id when receiving or sending rtp
@@ -946,6 +977,10 @@ void WebRtcTransportImp::onStartWebRTC() {
             // 记录ssrc对应的MediaTrack  [AUTO-TRANSLATED:8e344bc1]
             // Record the MediaTrack corresponding to ssrc
             _ssrc_to_track[ssrc.ssrc] = track;
+            _ssrc_to_wrapped_track[ssrc.ssrc] = std::unique_ptr<WrappedMediaTrack>(new WrappedRtpTrack(track, _twcc_ctx, *this));
+            if (ssrc.rtx_ssrc) {
+                _ssrc_to_wrapped_track[ssrc.rtx_ssrc] = std::unique_ptr<WrappedMediaTrack>(new WrappedRtxTrack(track));
+            }
             if (m_offer->rtp_rids.size() > index) {
                 // 支持firefox的simulcast, 提前映射好ssrc和rid的关系  [AUTO-TRANSLATED:86f3e5bf]
                 // Support firefox's simulcast, map the relationship between ssrc and rid in advance
@@ -1338,6 +1373,28 @@ void WebRtcTransportImp::onRtp(const char *buf, size_t len, uint64_t stamp_ms) {
     _alive_ticker.resetTime();
 
     RtpHeader *rtp = (RtpHeader *)buf;
+    auto ssrc = ntohl(rtp->ssrc);
+
+    auto it_by_ssrc = _ssrc_to_wrapped_track.find(ssrc);
+    if (it_by_ssrc != _ssrc_to_wrapped_track.end()) {
+        if (_rtcp_rr_send_ticker.elapsedTime() > 5000) {
+            _rtcp_rr_send_ticker.resetTime();
+            for (auto& it : _ssrc_to_track) {
+                auto report_ssrc = it.first;
+                auto &track = it.second;
+                auto rtp_chn = track->getRtpChannel(report_ssrc);
+                if (rtp_chn) {
+                    auto rr = rtp_chn->createRtcpRR(track->answer_ssrc_rtp);
+                    if (rr && rr->size() > 0) {
+                        sendRtcpPacket(rr->data(), rr->size(), true);
+                    }
+                }
+            }
+        }
+        it_by_ssrc->second->inputRtp(buf, len, stamp_ms, rtp);
+        return;
+    }
+
     // 根据接收到的rtp的pt信息，找到该流的信息  [AUTO-TRANSLATED:9a97682c]
     // Find the information of the stream according to the pt information of the received rtp
     auto it = _pt_to_track.find(rtp->pt);
@@ -1770,6 +1827,32 @@ void play_plugin(SocketHelper &sender, const WebRtcArgs &args, const onCreateWeb
     }
 }
 
+void push_batch_plugin(SocketHelper& sender, const WebRtcArgs &args, const onCreateWebRtc &cb) {
+    MediaInfo info(args["url"]);
+    auto stream_count = (size_t)std::max<int>(atoi(std::string(args["streamCount"]).data()), 1);
+
+    if (BatchPublishSessionManager::Instance().getSession(info.app, info.stream)) {
+        cb(WebRtcException(SockException(Err_other, "already publishing")));
+        return;
+    }
+
+    Broadcast::PublishAuthInvoker invoker = [cb, info, stream_count](const string &err, const ProtocolOption &option) mutable {
+        if (!err.empty()) {
+            cb(WebRtcException(SockException(Err_other, err)));
+            return;
+        }
+
+        auto rtc = MultiSourceWebRtcPusher::create(EventPollerPool::Instance().getPoller(), info, option, stream_count,
+            WebRtcTransport::Role::PEER, WebRtcTransport::SignalingProtocols::WHEP_WHIP);
+        cb(*rtc);
+    };
+
+    auto flag = NOTICE_EMIT(BroadcastMediaPublishArgs, Broadcast::kBroadcastMediaPublish, MediaOriginType::rtc_push, info, invoker, sender);
+    if (!flag) {
+        invoker("", ProtocolOption());
+    }
+}
+
 static void setWebRtcArgs(const WebRtcArgs &args, WebRtcInterface &rtc) {
     {
         static auto is_vaild_ip = [](const std::string &ip) -> bool {
@@ -1841,6 +1924,7 @@ static onceToken s_rtc_auto_register([]() {
 #endif
     WebRtcPluginManager::Instance().registerPlugin("push", push_plugin<WebRtcPusher>);
     WebRtcPluginManager::Instance().registerPlugin("play", play_plugin<WebRtcPlayer>);
+    WebRtcPluginManager::Instance().registerPlugin("push_batch", push_batch_plugin);
     WebRtcPluginManager::Instance().registerPlugin("talk", play_plugin<WebRtcTalk>);
 
     WebRtcPluginManager::Instance().setListener([](SocketHelper& sender, const std::string &type, const WebRtcArgs &args, const WebRtcInterface &rtc) {

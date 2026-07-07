@@ -93,6 +93,9 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
     ret._window_begin_at_ms = request._window_begin_at_ms;
     ret._window_end_at_ms = request._window_end_at_ms;
 
+    auto now_ms = (uint64_t)time(nullptr) * 1000;
+    auto temp_end_ms = std::min(now_ms, request._window_end_at_ms);
+
     GET_CONFIG(string, recordPath, Protocol::kMP4SavePath);
     GET_CONFIG(string, recordAppName, Record::kAppName);
     GET_CONFIG(bool, enableVhost, General::kEnableVhost);
@@ -139,7 +142,31 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
 
         while (auto sub_entry = readdir(pSubDir)) {
             string fname = sub_entry->d_name;
-            if (fname.empty() || fname[0] == '.') {
+            if (fname.empty()) {
+                continue;
+            }
+
+            if (fname[0] == '.') {
+                time_t tempStart = 0;
+                if (!parseTempRecordFileName(fname, tempStart, nullptr)) {
+                    continue;
+                }
+
+                auto fileBeginMs = (uint64_t)tempStart * 1000;
+                auto fileEndMs = temp_end_ms;
+                if (fileEndMs <= fileBeginMs) {
+                    continue;
+                }
+                if (fileEndMs <= request._window_begin_at_ms || fileBeginMs >= request._window_end_at_ms) {
+                    continue;
+                }
+
+                RtspReplaySegment seg;
+                seg._file_path = datePath + "/" + fname;
+                seg._begin_at_ms = fileBeginMs;
+                seg._end_at_ms = fileEndMs;
+                seg._duration_ms = fileEndMs - fileBeginMs;
+                ret._segments.emplace_back(std::move(seg));
                 continue;
             }
 

@@ -48,6 +48,7 @@
 #include "Pusher/PusherProxy.h"
 #include "Rtp/RtpProcess.h"
 #include "Record/MP4Reader.h"
+#include "Record/RecordFileName.h"
 
 #if defined(ENABLE_RTPPROXY)
 #include "Rtp/RtpServer.h"
@@ -2015,6 +2016,34 @@ void installWebApi() {
             }
             return true;
         }, false);
+
+        // Day-level query also exposes the currently recording temp slice as a virtual
+        // start_end filename, so external query->replay pipelines can parse begin/end
+        // consistently while replay still reads the real temp file internally.
+        if (search_mp4) {
+            auto now_sec = time(nullptr);
+            File::scanDir(record_path, [&](const string &path, bool isDir) {
+                if (isDir) {
+                    return true;
+                }
+                auto pos = path.rfind('/');
+                if (pos == string::npos) {
+                    return true;
+                }
+                auto name = path.substr(pos + 1);
+                time_t start_sec = 0;
+                string index_str;
+                if (!parseTempRecordFileName(name, start_sec, &index_str)) {
+                    return true;
+                }
+                if (now_sec <= start_sec) {
+                    return true;
+                }
+
+                paths.append(makeRecordFileName(start_sec, now_sec, index_str));
+                return true;
+            }, false, true);
+        }
 
         val["data"]["rootPath"] = record_path;
         val["data"]["paths"] = paths;

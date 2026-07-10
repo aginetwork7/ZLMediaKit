@@ -59,6 +59,7 @@ MP4Recorder::~MP4Recorder() {
 
 void MP4Recorder::createFile() {
     closeFile();
+    _warned_non_g711_audio_for_file = false;
     auto date = getUTCTimeStr("%Y-%m-%d");
     auto file_name = date + "-" + getUTCTimeStr("%H-%M-%S") + "-" + std::to_string(_file_index++) + ".mp4";
     auto full_path = _info.folder + date + "/" + file_name;
@@ -164,6 +165,15 @@ void MP4Recorder::flush() {
 }
 
 bool MP4Recorder::inputFrame(const Frame::Ptr &frame) {
+    if (frame->getTrackType() == TrackAudio && !isG711Codec(frame->getCodecId())) {
+        if (!_warned_non_g711_audio_for_file) {
+            WarnL << "-----mp4 record: skip non-G711 audio, file will contain no audio, codec="
+                  << getCodecName(frame->getCodecId()) << ", file=" << _info.file_name;
+            _warned_non_g711_audio_for_file = true;
+        }
+        return false;
+    }
+
     auto stamp_inc = _delta_stamp[frame->getTrackType()].relativeStamp(frame->pts(), false);
     if (!_muxer || (stamp_inc > int64_t(_max_second) * 1000 && (!_have_video || frame->keyFrame()))) {
         // 成立条件  [AUTO-TRANSLATED:8c9c6083]
@@ -189,6 +199,11 @@ bool MP4Recorder::inputFrame(const Frame::Ptr &frame) {
 }
 
 bool MP4Recorder::addTrack(const Track::Ptr &track) {
+    if (track->getTrackType() == TrackAudio && !isG711Codec(track->getCodecId())) {
+        // Keep MP4 recording audio codec deterministic: only accept G711 tracks.
+        return true;
+    }
+
     // 保存所有的track，为创建MP4MuxerFile做准备  [AUTO-TRANSLATED:815c2486]
     // Save all tracks in preparation for creating MP4MuxerFile
     _tracks.emplace_back(track);
@@ -202,6 +217,7 @@ void MP4Recorder::resetTracks() {
     closeFile();
     _tracks.clear();
     _have_video = false;
+    _warned_non_g711_audio_for_file = false;
 }
 
 // 递归扫描目录中断电或异常退出导致的孤儿临时mp4文件并恢复

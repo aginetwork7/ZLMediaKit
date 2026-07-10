@@ -85,4 +85,4 @@ COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/config.ini /opt/m
 COPY --from=build /opt/media/ZLMediaKit/www/ /opt/media/bin/www/
 
 ENV PATH=/opt/media/bin:$PATH
-CMD ["./MediaServer","-s", "default.pem", "-c", "../conf/config.ini", "--log-dir", "/opt/media/bin/log", "-l","0"]
+CMD ["./MediaServer","-s", "default.pem", "-c", "../conf/config.ini", "--log-dir", "/opt/media/bin/log", "-l","1"]

@@ -79,6 +79,7 @@ private:
 
 private:
     bool _have_video = false;
+    bool _warned_non_g711_audio_for_file = false;
     size_t _max_second;
     DeltaStamp _delta_stamp[TrackMax];
     std::atomic<uint64_t> _file_index { 0 };

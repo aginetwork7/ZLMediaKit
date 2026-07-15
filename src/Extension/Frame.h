@@ -142,6 +142,10 @@ int getMpegIdByCodec(CodecId codec);
  */
 CodecId getCodecByMpegId(int mpeg_id);
 
+inline bool isG711Codec(CodecId codec) {
+    return codec == CodecG711A || codec == CodecG711U;
+}
+
 /**
  * 编码信息的抽象接口
  * Abstract interface for encoding information

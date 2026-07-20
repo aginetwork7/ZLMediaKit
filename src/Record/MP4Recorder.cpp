@@ -94,7 +94,8 @@ void MP4Recorder::asyncClose() {
     auto info = _info;
     TraceL << "Start close tmp mp4 file: " << full_path_tmp;
     WorkThreadPool::Instance().getExecutor()->async([muxer, full_path_tmp, info]() mutable {
-        info.time_len = muxer->getDuration() / 1000.0f;
+        auto duration_ms = muxer->getDuration();
+        info.time_len = duration_ms / 1000.0f;
         // 关闭mp4可能非常耗时，所以要放在后台线程执行  [AUTO-TRANSLATED:a7378a11]
         // Closing mp4 can be very time-consuming, so it should be executed in the background thread
         TraceL << "Closing tmp mp4 file: " << full_path_tmp;
@@ -113,9 +114,13 @@ void MP4Recorder::asyncClose() {
 
             // 根据实际录制时长计算 End 时间，重建文件名为 start_end 格式
             // Compute end time from actual duration, rebuild filename with start_end scheme
-            // 半开区间 [Begin, End)：End = Start + 截断秒数
-            // Half-open interval [Begin, End): End = Start + truncated seconds
-            time_t end_time = info.start_time + (time_t)(info.time_len);
+            // 半开区间 [Begin, End)：End = Start + 截断秒数，且至少为 Start + 1
+            // Half-open interval [Begin, End): End = Start + truncated seconds, at least Start + 1
+            time_t duration_sec = (time_t)(duration_ms / 1000);
+            if (duration_sec < 1) {
+                duration_sec = 1;
+            }
+            time_t end_time = info.start_time + duration_sec;
 
             // 从原始文件名提取 file index（最后一个 '-' 与 '.mp4' 之间的部分）
             // Extract file index from original filename (between last '-' and '.mp4')
@@ -267,7 +272,11 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
             demuxer.closeMP4();
 
             time_t start_time = timegm(&start_tm);
-            time_t end_time = start_time + (time_t)(duration_ms / 1000.0);
+            time_t duration_sec = (time_t)(duration_ms / 1000);
+            if (duration_sec < 1) {
+                duration_sec = 1;
+            }
+            time_t end_time = start_time + duration_sec;
 
             auto new_name = makeRecordFileName(start_time, end_time, index_str);
             auto new_path = dir + "/" + new_name;
@@ -288,12 +297,16 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
 
 void MP4Recorder::recoverOrphanRecordings() {
     GET_CONFIG(string, recordPath, Protocol::kMP4SavePath);
+    GET_CONFIG(string, recordAppName, Record::kAppName);
     if (recordPath.empty()) {
         return;
     }
+
     auto absPath = File::absolutePath("", recordPath);
+    auto filePath = recordAppName + "/";
+    auto recoverRoot = File::absolutePath(filePath, absPath);
     int recovered = 0, skipped = 0;
-    recoverOrphansInDir(absPath, recovered, skipped);
+    recoverOrphansInDir(recoverRoot, recovered, skipped);
     if (recovered > 0 || skipped > 0) {
         InfoL << "Orphan recording recovery complete: recovered=" << recovered << ", skipped=" << skipped;
     }

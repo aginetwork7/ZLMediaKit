@@ -511,15 +511,22 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
         auto schema = info.schema;
         auto vhost = info.vhost;
         auto stream = info.stream;
-        WorkThreadPool::Instance().getExecutor()->async([weak_session, poller, schema, vhost, stream, run_find]() {
+        WorkThreadPool::Instance().getExecutor()->async([weak_session, poller, schema, vhost, stream, run_find, cb]() {
             string replay_session_stream;
             createReplaySession(schema, vhost, stream, replay_session_stream);
-            poller->async([weak_session, run_find, replay_session_stream]() {
+            poller->async([weak_session, run_find, replay_session_stream, cb]() {
                 if (!weak_session.lock()) {
                     // 请求方已断开；已创建的预备 replay 源由工厂自带的延时任务回收
                     return;
                 }
-                run_find(!replay_session_stream.empty(), replay_session_stream);
+
+                // Replay lookup miss should fail fast and must not fall back to live-stream
+                // not-found/auto-pull pipeline.
+                if (replay_session_stream.empty()) {
+                    cb(nullptr);
+                    return;
+                }
+                run_find(true, replay_session_stream);
             });
         });
         return;

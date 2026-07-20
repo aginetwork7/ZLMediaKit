@@ -493,7 +493,7 @@ bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms) {
         while (!eof) {
             auto frame = _demuxer->readFrame(key_frame, eof);
             if (!frame) {
-                continue;
+                break;
             }
 
             auto playable = !_have_video || key_frame || frame->keyFrame() || frame->configFrame();

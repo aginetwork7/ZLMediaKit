@@ -257,6 +257,7 @@ void MultiMP4Demuxer::openMP4(const string &files_string) {
         _demuxers.emplace(duration_ms, demuxer);
         duration_ms += file_duration_ms;
     }
+    _total_duration_ms = duration_ms;
     CHECK(!_demuxers.empty());
     _it = _demuxers.begin();
     for (auto &track : _it->second->getTracks(false)) {
@@ -268,13 +269,14 @@ void MultiMP4Demuxer::openMP4(const string &files_string) {
 }
 
 uint64_t MultiMP4Demuxer::getDurationMS() const {
-    return _demuxers.empty() ? 0 : _demuxers.rbegin()->first + _demuxers.rbegin()->second->getDurationMS();
+    return _total_duration_ms;
 }
 
 void MultiMP4Demuxer::closeMP4() {
     _demuxers.clear();
     _it = _demuxers.end();
     _tracks.clear();
+    _total_duration_ms = 0;
 }
 
 int64_t MultiMP4Demuxer::seekTo(int64_t stamp_ms) {

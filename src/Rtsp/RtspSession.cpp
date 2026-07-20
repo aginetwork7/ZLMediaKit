@@ -56,7 +56,7 @@ static bool getFileStat(const string &path, time_t &mtime, off_t &size) {
 // File format: {"username":"xxx","password":"xxx"}
 static bool loadRtspAuthFile(const string &path, string &username, string &password) {
     if (path.empty()) {
-        WarnL << "rtsp authFile path is empty";
+        ErrorL << "rtsp authFile path is empty";
         return false;
     }
 
@@ -67,13 +67,7 @@ static bool loadRtspAuthFile(const string &path, string &username, string &passw
     time_t mtime = 0;
     off_t size = -1;
     if (!getFileStat(path, mtime, size)) {
-        if (same_path) {
-            WarnL << "rtsp authFile stat failed, keep cached credentials: " << path;
-            username = cache.username;
-            password = cache.password;
-            return true;
-        }
-        WarnL << "rtsp authFile stat failed: " << path;
+        ErrorL << "rtsp authFile stat failed: " << path;
         return false;
     }
 
@@ -85,13 +79,7 @@ static bool loadRtspAuthFile(const string &path, string &username, string &passw
 
     ifstream ifs(path);
     if (!ifs.is_open()) {
-        if (same_path) {
-            WarnL << "rtsp authFile open failed, keep cached credentials: " << path;
-            username = cache.username;
-            password = cache.password;
-            return true;
-        }
-        WarnL << "rtsp authFile open failed: " << path;
+        ErrorL << "rtsp authFile open failed: " << path;
         return false;
     }
 
@@ -99,24 +87,14 @@ static bool loadRtspAuthFile(const string &path, string &username, string &passw
     Json::CharReaderBuilder builder;
     string errs;
     if (!Json::parseFromStream(builder, ifs, &root, &errs)) {
-        WarnL << "rtsp authFile parse failed: " << path << ", err: " << errs;
-        if (same_path) {
-            username = cache.username;
-            password = cache.password;
-            return true;
-        }
+        ErrorL << "rtsp authFile parse failed: " << path << ", err: " << errs;
         return false;
     }
 
     auto new_username = root["username"].asString();
     auto new_password = root["password"].asString();
     if (new_username.empty() || new_password.empty()) {
-        WarnL << "rtsp authFile missing username/password: " << path;
-        if (same_path) {
-            username = cache.username;
-            password = cache.password;
-            return true;
-        }
+        ErrorL << "rtsp authFile missing username/password: " << path;
         return false;
     }
 

@@ -155,6 +155,7 @@ private:
     std::map<int, Track::Ptr> _tracks;
     std::map<uint64_t, MP4Demuxer::Ptr>::iterator _it;
     std::map<uint64_t, MP4Demuxer::Ptr> _demuxers;
+    uint64_t _total_duration_ms = 0;
 };
 
 }//namespace mediakit

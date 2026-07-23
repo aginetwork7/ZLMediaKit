@@ -266,8 +266,8 @@ static onceToken token([]() {
     mINI::Instance()[kDirectProxy] = 1;
     mINI::Instance()[kLowLatency] = 0;
     mINI::Instance()[kRtpTransportType] = -1;
-    mINI::Instance()[kMaxSessionCount] = 64;
-    mINI::Instance()[kMaxReplaySessionCount] = 16;
+    mINI::Instance()[kMaxSessionCount] = 128;
+    mINI::Instance()[kMaxReplaySessionCount] = 32;
     mINI::Instance()[kReplayAppName] = "replay";
 });
 } // namespace Rtsp

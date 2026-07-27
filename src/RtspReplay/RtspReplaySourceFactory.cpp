@@ -81,6 +81,10 @@ void RtspReplaySourceFactory::create(const string &schema, const string &vhost, 
         option.enable_mp4 = false;
         option.enable_hls = false;
         option.enable_hls_fmp4 = false;
+        option.enable_rtsp = true;
+        option.enable_rtmp = false;
+        option.enable_ts = false;
+        option.enable_fmp4 = false;
         option.max_track = 16;
 
         GET_CONFIG(string, replay_app, Rtsp::kReplayAppName);

@@ -10,6 +10,8 @@
 
 #ifdef ENABLE_MP4
 #include <ctime>
+#include <cerrno>
+#include <cstring>
 #include <sys/stat.h>
 #include <dirent.h>
 #include "Util/File.h"
@@ -147,7 +149,12 @@ void MP4Recorder::asyncClose() {
 
             // 临时文件名改成正式文件名，防止mp4未完成时被访问  [AUTO-TRANSLATED:541a6f00]
             // Change the temporary file name to the official file name to prevent access to the mp4 before it is completed
-            rename(full_path_tmp.data(), info.file_path.data());
+            if (0 != ::rename(full_path_tmp.c_str(), info.file_path.c_str())) {
+                WarnL << "finalize mp4 rename failed: " << full_path_tmp
+                      << " -> " << info.file_path
+                      << ", err=" << strerror(errno);
+                return;
+            }
         }
         TraceL << "Emit mp4 record event: " << info.file_path;
         // 触发mp4录制切片生成事件  [AUTO-TRANSLATED:9959dcd4]
@@ -280,6 +287,12 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
 
             auto new_name = makeRecordFileName(start_time, end_time, index_str);
             auto new_path = dir + "/" + new_name;
+            struct stat dst_st = {};
+            if (::stat(new_path.c_str(), &dst_st) == 0) {
+                WarnL << "Recovery target exists, skip to keep idempotent: " << new_path;
+                ++skipped;
+                continue;
+            }
             if (0 == ::rename(path.c_str(), new_path.c_str())) {
                 InfoL << "Recovered orphan recording: " << path << " -> " << new_path;
                 ++recovered;

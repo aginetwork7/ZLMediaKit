@@ -85,7 +85,7 @@ public:
 
     void setSpeed(float speed) {
         std::lock_guard<std::recursive_mutex> lck(_mtx);
-        if (speed <= 0) {
+        if (!isfinite(speed) || speed <= 0) {
             return;
         }
         setCurrentStamp(getCurrentStamp());

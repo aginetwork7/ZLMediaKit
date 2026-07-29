@@ -70,6 +70,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         apt-get install -y --no-install-recommends \
          ca-certificates \
          tzdata \
+         ffmpeg \
         openssl && \
          apt-get autoremove -y && \
         apt-get clean -y

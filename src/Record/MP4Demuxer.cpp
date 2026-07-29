@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <ctime>
 #include "MP4Demuxer.h"
+#include "RecordFileName.h"
 #include "Util/File.h"
 #include "Util/logger.h"
 #include "Extension/Factory.h"
@@ -25,27 +26,11 @@ namespace mediakit {
 static uint64_t getDurationFromRecordFileName(const string &file) {
     auto pos = file.rfind('/');
     auto name = (pos == string::npos) ? file : file.substr(pos + 1);
-    if (name.size() < 43 || !end_with(name, ".mp4")) {
+    time_t start_sec = 0;
+    time_t end_sec = 0;
+    if (!parseRecordFileName(name, start_sec, end_sec)) {
         return 0;
     }
-
-    auto base = name.substr(0, name.size() - 4);
-    auto sep = base.find('_');
-    if (sep == string::npos || sep < 19 || base.size() < sep + 20) {
-        return 0;
-    }
-
-    struct tm start_tm = {};
-    struct tm end_tm = {};
-    if (!strptime(base.substr(0, 19).c_str(), "%Y-%m-%d-%H-%M-%S", &start_tm)) {
-        return 0;
-    }
-    if (!strptime(base.substr(sep + 1, 19).c_str(), "%Y-%m-%d-%H-%M-%S", &end_tm)) {
-        return 0;
-    }
-
-    auto start_sec = timegm(&start_tm);
-    auto end_sec = timegm(&end_tm);
     if (end_sec <= start_sec) {
         return 0;
     }

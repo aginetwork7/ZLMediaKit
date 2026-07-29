@@ -386,10 +386,16 @@ static MediaSource::Ptr find_l(const string &schema, const string &vhost_in, con
 
 static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &session, bool retry,
                         const function<void(const MediaSource::Ptr &src)> &cb){
+    weak_ptr<Session> weak_session = session;
     // Continuation that performs the actual lookup. For replay it is invoked after the heavy
     // catalog scan / openMP4 probe has finished off the request poller; for every other path it
     // runs synchronously right below, identical to the original flow.
-    auto run_find = [info, session, retry, cb](bool replay_mode, const string &replay_session_stream) {
+    auto run_find = [info, weak_session, retry, cb](bool replay_mode, const string &replay_session_stream) {
+    auto strong_session = weak_session.lock();
+    if (!strong_session) {
+        cb(nullptr);
+        return;
+    }
     GET_CONFIG(string, replay_app, Rtsp::kReplayAppName);
     const string target_app = replay_mode ? replay_app : info.app;
     const string target_stream = replay_mode ? replay_session_stream : info.stream;
@@ -406,8 +412,8 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
     }
 
     GET_CONFIG(int, maxWaitMS, General::kMaxStreamWaitTimeMS);
-    void *listener_tag = session.get();
-    auto poller = session->getPoller();
+    void *listener_tag = strong_session.get();
+    auto poller = strong_session->getPoller();
     std::shared_ptr<atomic_flag> invoked(new atomic_flag{false});
     auto cb_once = [cb, invoked](const MediaSource::Ptr &src) {
         if (invoked->test_and_set()) {
@@ -458,7 +464,6 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
         return find_target();
     };
 
-    weak_ptr<Session> weak_session = session;
     auto on_register = [weak_session, cb_once, cancel_all, poller, match_target, resolve_target_after_register](BroadcastMediaChangedArgs) {
         if (!bRegist || !match_target(sender)) {
             // 不是自己感兴趣的事件，忽略之  [AUTO-TRANSLATED:b4e102d4]
@@ -499,19 +504,21 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
     };
     // 广播未找到流,此时可以立即去拉流，这样还来得及  [AUTO-TRANSLATED:794014f1]
     // Broadcast that the stream is not found, at this time you can immediately pull the stream, so it is still in time
-    NOTICE_EMIT(BroadcastNotFoundStreamArgs, Broadcast::kBroadcastNotFoundStream, info, *session, close_player);
+    NOTICE_EMIT(BroadcastNotFoundStreamArgs, Broadcast::kBroadcastNotFoundStream, info, *strong_session, close_player);
     }; // run_find
 
 #ifdef ENABLE_MP4
     // replay: stream id 命中 replay 规则时创建独立会话; 放到 WorkThreadPool 执行，避免阻塞请求方 poller
     // 上挂载的其它连接；完成后切回原 poller，保持 NoticeCenter/Session 线程模型一致。
     if (retry && RtspReplaySourceFactory::validateStreamKey(info.stream)) {
-        weak_ptr<Session> weak_session = session;
         auto poller = session->getPoller();
         auto schema = info.schema;
         auto vhost = info.vhost;
         auto stream = info.stream;
         WorkThreadPool::Instance().getExecutor()->async([weak_session, poller, schema, vhost, stream, run_find, cb]() {
+            if (!weak_session.lock()) {
+                return;
+            }
             string replay_session_stream;
             createReplaySession(schema, vhost, stream, replay_session_stream);
             poller->async([weak_session, run_find, replay_session_stream, cb]() {

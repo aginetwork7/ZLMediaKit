@@ -4,11 +4,12 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: record_zlm_resources.sh --pid <MediaServer PID> --stream-count <clients> --network-interface <name> [--interval <seconds>]
+Usage: record_zlm_resources.sh --pid <MediaServer PID|auto> --stream-count <clients> --network-interface <name> [--interval <seconds>] [--log-dir <path>]
 
-Records RTSP replay benchmark metrics for the target process. The stream count
-must match test_bench_replay --count. CSV files are always written to
-/opt/media/bin/log.
+Run this script in the namespace that owns MediaServer: use docker exec inside
+the ZLM container, or execute it directly on macOS/Linux. CPU, RSS, and network
+counters are then read from that same namespace. The stream count must match
+test_bench_replay --count. --pid auto finds a process named MediaServer.
 EOF
 }
 
@@ -23,6 +24,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --pid)
             pid="${2:-}"
+            shift 2
+            ;;
+        --log-dir)
+            log_dir="${2:-}"
             shift 2
             ;;
         --interval)
@@ -49,13 +54,36 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]] || [[ ! "$stream_count" =~ ^[1-9][0-9]*$ ]] || [[ -z "$network_interface" ]]; then
+if [[ -z "$pid" ]] || [[ ! "$stream_count" =~ ^[1-9][0-9]*$ ]] || [[ -z "$network_interface" ]]; then
     usage >&2
     exit 2
 fi
 
 if [[ ! "$interval" =~ ^[1-9][0-9]*$ ]]; then
     echo "--interval must be a positive integer in seconds" >&2
+    exit 2
+fi
+
+if [[ "$pid" == "auto" ]]; then
+    pid=""
+    if command -v pgrep >/dev/null; then
+        pid="$(pgrep -n MediaServer 2>/dev/null || true)"
+    fi
+    if [[ -z "$pid" && "$(uname -s)" == "Linux" ]]; then
+        for process_dir in /proc/[0-9]*; do
+            if [[ -r "$process_dir/comm" ]] && [[ "$(<"$process_dir/comm")" == "MediaServer" ]]; then
+                pid="${process_dir##*/}"
+            fi
+        done
+    fi
+    if [[ -z "$pid" ]]; then
+        echo "Cannot find a MediaServer process; pass --pid explicitly" >&2
+        exit 1
+    fi
+fi
+
+if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--pid must be a positive PID or auto" >&2
     exit 2
 fi
 
@@ -66,8 +94,36 @@ fi
 
 mkdir -p "$log_dir"
 output_file="$log_dir/zlm-resource-$(date +%Y%m%d-%H%M%S).csv"
-printf '本地时间,时间戳,客户端类型,流个数,cpu(%%),内存(MB),网络io(MB/s)\n' > "$output_file"
+summary_file="${output_file%.csv}.summary.txt"
+csv_header='本地时间,时间戳,客户端类型,流个数,cpu(%),内存(MB),网络io(MB/s)'
+printf '%s\n' "$csv_header" > "$output_file"
+printf '%s\n' "$csv_header"
 echo "Writing ZLM resource samples to $output_file"
+echo "Targeting MediaServer PID $pid in the current $(uname -s) namespace"
+
+sample_count=0
+cpu_peak_pct="0.00"
+rss_peak_mb="0.00"
+
+update_peaks() {
+    local cpu_pct="$1"
+    local rss_mb="$2"
+
+    cpu_peak_pct="$(awk -v value="$cpu_pct" -v peak="$cpu_peak_pct" 'BEGIN { if (value > peak) peak = value; printf "%.2f", peak }')"
+    rss_peak_mb="$(awk -v value="$rss_mb" -v peak="$rss_peak_mb" 'BEGIN { if (value > peak) peak = value; printf "%.2f", peak }')"
+    sample_count=$((sample_count + 1))
+}
+
+write_summary() {
+    local reason="$1"
+    {
+        echo "$reason"
+        echo "samples=$sample_count"
+        echo "cpu_peak_pct=$cpu_peak_pct"
+        echo "rss_peak_mb=$rss_peak_mb"
+    } | tee "$summary_file"
+    echo "Resource summary written to $summary_file"
+}
 
 read_network_bytes() {
     local rx_bytes tx_bytes
@@ -101,7 +157,8 @@ append_sample() {
     previous_network_rx_bytes="$rx_bytes"
     previous_network_tx_bytes="$tx_bytes"
     previous_network_seconds="$now_seconds"
-    printf '%s,%s,%s,%s,%s,%s,%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$now_seconds" "$client_type" "$stream_count" "$cpu_pct" "$rss_mb" "$network_io_mb_s" >> "$output_file"
+    update_peaks "$cpu_pct" "$rss_mb"
+    printf '%s, %s, %s, %s, %s, %s, %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$now_seconds" "$client_type" "$stream_count" "$cpu_pct" "$rss_mb" "$network_io_mb_s" | tee -a "$output_file"
 }
 
 sample_linux() {
@@ -154,7 +211,7 @@ case "$(uname -s)" in
         ;;
 esac
 
-trap 'echo "Stopped resource recording: $output_file"; exit 0' INT TERM
+trap 'write_summary "Stopped resource recording: $output_file"; exit 0' INT TERM
 while kill -0 "$pid" 2>/dev/null; do
     case "$(uname -s)" in
         Linux) sample_linux ;;
@@ -163,4 +220,4 @@ while kill -0 "$pid" 2>/dev/null; do
     sleep "$interval"
 done
 
-echo "Process $pid exited; resource recording stopped: $output_file"
+write_summary "Process $pid exited; resource recording stopped: $output_file"

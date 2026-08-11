@@ -94,8 +94,7 @@ fi
 
 mkdir -p "$log_dir"
 output_file="$log_dir/zlm-resource-$(date +%Y%m%d-%H%M%S).csv"
-summary_file="${output_file%.csv}.summary.txt"
-csv_header='本地时间,时间戳,客户端类型,流个数,cpu(%),内存(MB),网络io(MB/s)'
+csv_header='record_type,本地时间,时间戳,客户端类型,流个数,cpu(%),内存(MB),网络io(MB/s),cpu_peak(%),内存峰值(MB),reason'
 printf '%s\n' "$csv_header" > "$output_file"
 printf '%s\n' "$csv_header"
 echo "Writing ZLM resource samples to $output_file"
@@ -116,13 +115,12 @@ update_peaks() {
 
 write_summary() {
     local reason="$1"
-    {
-        echo "$reason"
-        echo "samples=$sample_count"
-        echo "cpu_peak_pct=$cpu_peak_pct"
-        echo "rss_peak_mb=$rss_peak_mb"
-    } | tee "$summary_file"
-    echo "Resource summary written to $summary_file"
+    local escaped_reason
+    escaped_reason="$(printf '%s' "$reason" | sed 's/"/""/g')"
+    printf 'summary,%s,%s,%s,%s,,,,%s,%s,"%s"\n' \
+        "$(date +%Y-%m-%dT%H:%M:%S%z)" "$(date +%s)" "$client_type" "$stream_count" \
+        "$cpu_peak_pct" "$rss_peak_mb" "$escaped_reason" | tee -a "$output_file"
+    echo "Resource summary appended to $output_file"
 }
 
 read_network_bytes() {
@@ -158,7 +156,9 @@ append_sample() {
     previous_network_tx_bytes="$tx_bytes"
     previous_network_seconds="$now_seconds"
     update_peaks "$cpu_pct" "$rss_mb"
-    printf '%s, %s, %s, %s, %s, %s, %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$now_seconds" "$client_type" "$stream_count" "$cpu_pct" "$rss_mb" "$network_io_mb_s" | tee -a "$output_file"
+    printf 'sample,%s,%s,%s,%s,%s,%s,%s,,,\n' \
+        "$(date +%Y-%m-%dT%H:%M:%S%z)" "$now_seconds" "$client_type" "$stream_count" \
+        "$cpu_pct" "$rss_mb" "$network_io_mb_s" | tee -a "$output_file"
 }
 
 sample_linux() {

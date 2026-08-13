@@ -4,6 +4,11 @@ services:
   zlmediakit:
     image: ${REGISTRY}/zlmediakit:${ZLM_TAG}
     container_name: zlmediakit
+    network_mode: host
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
     ports:
       - "8089:8089"
       - "554:554"

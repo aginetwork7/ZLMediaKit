@@ -1249,7 +1249,7 @@ void WebRtcTransportImp::onRtcp(const char *buf, size_t len) {
                 auto &track = it->second;
                 auto rtp_chn = track->getRtpChannel(sr->ssrc);
                 if (!rtp_chn) {
-                    WarnL << "未识别的sr rtcp包:" << rtcp->dumpString();
+                    //WarnL << "未识别的sr rtcp包:" << rtcp->dumpString();
                 } else {
                     // 设置rtp时间戳与ntp时间戳的对应关系  [AUTO-TRANSLATED:e92f4749]
                     // Set the correspondence between rtp timestamp and ntp timestamp
@@ -1257,7 +1257,7 @@ void WebRtcTransportImp::onRtcp(const char *buf, size_t len) {
                     rtp_chn->onRtcp(sr);
                 }
             } else {
-                WarnL << "未识别的sr rtcp包:" << rtcp->dumpString();
+                //WarnL << "未识别的sr rtcp包:" << rtcp->dumpString();
             }
             break;
         }

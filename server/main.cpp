@@ -165,6 +165,22 @@ public:
                              "配置文件路径",/*该选项说明文字*/
                              nullptr);
 
+                    (*_parser) << Option(0,/*该选项简称，如果是\x00则说明无简称*/
+                                 "hook-base-url",/*该选项全称,每个选项必须有全称；不得为null或空字符串*/
+                                 Option::ArgRequired,/*该选项后面必须跟值*/
+                                 nullptr,/*该选项默认值*/
+                                 false,/*该选项是否必须赋值，如果没有默认值且为ArgRequired时用户必须提供该参数否则将抛异常*/
+                                 "替换配置中的__HOOK_BASE_URL__占位符",/*该选项说明文字*/
+                                 nullptr);
+
+        (*_parser) << Option(0,/*该选项简称，如果是\x00则说明无简称*/
+                             "media-server-id",/*该选项全称,每个选项必须有全称；不得为null或空字符串*/
+                             Option::ArgRequired,/*该选项后面必须跟值*/
+                             nullptr,/*该选项默认值*/
+                             false,/*该选项是否必须赋值，如果没有默认值且为ArgRequired时用户必须提供该参数否则将抛异常*/
+                             "覆盖配置中的mediaServerId",/*该选项说明文字*/
+                             nullptr);
+
         (*_parser) << Option('s',/*该选项简称，如果是\x00则说明无简称*/
                              "ssl",/*该选项全称,每个选项必须有全称；不得为null或空字符串*/
                              Option::ArgRequired,/*该选项后面必须跟值*/
@@ -231,6 +247,23 @@ public:
 // Global variable, used in WebApi to save configuration files
 string g_ini_file;
 
+static void replaceHookBaseUrl(string hook_base_url) {
+    static const string kPlaceholder = "__HOOK_BASE_URL__";
+    if (hook_base_url.empty()) {
+        return;
+    }
+    while (hook_base_url.size() > 1 && hook_base_url.back() == '/') {
+        hook_base_url.pop_back();
+    }
+    for (auto &pr : mINI::Instance()) {
+        size_t pos = 0;
+        while ((pos = pr.second.find(kPlaceholder, pos)) != string::npos) {
+            pr.second.replace(pos, kPlaceholder.size(), hook_base_url);
+            pos += hook_base_url.size();
+        }
+    }
+}
+
 // 加载ssl证书函数对象
 std::function<void()> g_reload_certificates;
 
@@ -250,6 +283,8 @@ int start_main(int argc,char *argv[]) {
         LogLevel logLevel = (LogLevel) cmd_main["level"].as<int>();
         logLevel = MIN(MAX(logLevel, LTrace), LError);
         g_ini_file = cmd_main["config"];
+        string hook_base_url = cmd_main.hasKey("hook-base-url") ? cmd_main["hook-base-url"] : "";
+        string media_server_id = cmd_main.hasKey("media-server-id") ? cmd_main["media-server-id"] : "";
         string ssl_file = cmd_main["ssl"];
         int threads = cmd_main["threads"];
         bool affinity = cmd_main["affinity"];
@@ -300,6 +335,10 @@ int start_main(int argc,char *argv[]) {
         // 加载配置文件，如果配置文件不存在就创建一个  [AUTO-TRANSLATED:761e7479]
         // Load configuration file, create one if it doesn't exist
         loadIniConfig(g_ini_file.data());
+        replaceHookBaseUrl(hook_base_url);
+        if (!media_server_id.empty()) {
+            mINI::Instance()[General::kMediaServerId] = media_server_id;
+        }
 
         auto &secret = mINI::Instance()[API::kSecret];
         if (secret == "035c73f7-bb6b-4889-a715-d9eb2d1925cc" || secret.empty()) {

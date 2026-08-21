@@ -6,8 +6,9 @@ services:
     container_name: zlmediakit
     network_mode: host
     environment:
-      MEDIA_CONFIG_TYPE: ${MEDIA_CONFIG_TYPE:-media}
+      MEDIA_CONFIG_TYPE: ${MEDIA_CONFIG_TYPE:-sfu}
       MEDIA_SERVICE_HOOK_BASE_URL: ${MEDIA_SERVICE_HOOK_BASE_URL:?MEDIA_SERVICE_HOOK_BASE_URL is required}
+      MEDIA_SERVER_ID: ${MEDIA_SERVER_ID:-}
     cap_add:
       - SYS_NICE
     ulimits:
@@ -17,7 +18,5 @@ services:
       - "554:554"
       - "8449:8449"
     volumes:
-      - /data/agi7/tinynvr/auth:/opt/media/auth
       - /data/agi7/zlmediakit/log:/opt/media/bin/log
-      - /data/mergefs:/data/mergefs:rslave
     restart: unless-stopped

@@ -274,6 +274,7 @@ const char* WebRtcTransport::RoleStr(Role role) {
 
 WebRtcTransport::WebRtcTransport(const EventPoller::Ptr &poller) {
     _poller = poller;
+    _create_time_ms = getCurrentMillisecond(true);
     static auto prefix = getServerPrefix();
     _identifier = prefix + to_string(++s_key);
     _packet_pool.setSize(64);
@@ -388,6 +389,7 @@ void WebRtcTransport::connectivityCheckForSFU() {
 
 void WebRtcTransport::onIceTransportCompleted() {
     InfoL << getIdentifier();
+    updateNetworkInfo(_ice_agent->getSelectedPair(), true);
 
     if (!_answer_sdp) {
         onShutdown(SockException(Err_other, "answer sdp not ready"));
@@ -594,6 +596,52 @@ Session::Ptr WebRtcTransport::getSession() const {
     return pair ? static_pointer_cast<Session>(pair->_socket->shared_from_this()) : nullptr;
 }
 
+WebRtcTransport::NetworkInfo WebRtcTransport::getNetworkInfo() const {
+    lock_guard<mutex> lock(_network_info_mtx);
+    return _network_info;
+}
+
+void WebRtcTransport::updateNetworkInfo(const IceTransport::Pair::Ptr &pair, bool force) {
+    if (!pair || !pair->_socket || !pair->_socket->getSock()) {
+        return;
+    }
+    if (!force && _network_info_ready.load(memory_order_relaxed)) {
+        return;
+    }
+    lock_guard<mutex> lock(_network_info_mtx);
+    auto info = _ice_agent->getSelectedPairInfo();
+    auto network_type = pair->_socket->getSock()->sockType() == SockNum::Sock_TCP ? "tcp" : "udp";
+    if (!info.isMember("localCandidate")) {
+        info["localCandidate"]["address"] = pair->get_local_ip() + ":" + to_string(pair->get_local_port());
+        info["localCandidate"]["type"] = "host";
+        info["localCandidate"]["transport"] = network_type;
+        info["localCandidate"]["state"] = "connected";
+    }
+    if (!info.isMember("remoteCandidate")) {
+        info["remoteCandidate"]["address"] = pair->get_peer_ip() + ":" + to_string(pair->get_peer_port());
+        info["remoteCandidate"]["type"] = "host";
+        info["remoteCandidate"]["transport"] = network_type;
+        info["remoteCandidate"]["state"] = "connected";
+    }
+    auto &local_candidate = info["localCandidate"];
+    _network_info.local_candidate = local_candidate["address"].asString() + " /" + local_candidate["type"].asString() + "/" + local_candidate["transport"].asString() + " (" + local_candidate["state"].asString() + ")";
+    auto &remote_candidate = info["remoteCandidate"];
+    _network_info.remote_candidate = remote_candidate["address"].asString() + " /" + remote_candidate["type"].asString() + "/" + remote_candidate["transport"].asString() + " (" + remote_candidate["state"].asString() + ")";
+    _network_info_ready.store(true, memory_order_relaxed);
+}
+
+string WebRtcTransport::getHealth() const {
+    auto last_activity = _last_activity_ms.load(memory_order_relaxed);
+    if (!last_activity || getCurrentMillisecond() - last_activity > getTimeOutSec() * 1000) {
+        return "unhealthy";
+    }
+    return "healthy";
+}
+
+void WebRtcTransport::markActivity() {
+    _last_activity_ms.store(getCurrentMillisecond(), memory_order_relaxed);
+}
+
 void WebRtcTransport::removePair(const SocketHelper *socket) {
     _ice_agent->removePair(socket);
 }
@@ -748,6 +796,10 @@ void WebRtcTransport::inputSockData(const char *buf, int len, const SocketHelper
 
 void WebRtcTransport::inputSockData(const char *buf, int len, const IceTransport::Pair::Ptr& pair) {
     // DebugL;
+    if (len > 0) {
+        addRecvBytes((size_t)len);
+        updateNetworkInfo(pair);
+    }
     _recv_ticker.resetTime();
     if (_ice_agent->processSocketData((const uint8_t *)buf, len, pair)) {
         return;
@@ -856,6 +908,9 @@ void WebRtcTransportImp::onDestory() {
 }
 
 void WebRtcTransportImp::onSendSockData(Buffer::Ptr buf, bool flush, const IceTransport::Pair::Ptr& pair) {
+    if (buf) {
+        addSendBytes(buf->size());
+    }
     return _ice_agent->sendSocketData(buf, pair, flush);
 }
 
@@ -1682,6 +1737,20 @@ void WebRtcTransportManager::removeItem(const string &key) {
     _map.erase(key);
 }
 
+vector<WebRtcTransportImp::Ptr> WebRtcTransportManager::getItems() {
+    vector<WebRtcTransportImp::Ptr> items;
+    lock_guard<mutex> lck(_mtx);
+    for (auto it = _map.begin(); it != _map.end();) {
+        if (auto item = it->second.lock()) {
+            items.emplace_back(std::move(item));
+            ++it;
+        } else {
+            it = _map.erase(it);
+        }
+    }
+    return items;
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////////
 
 WebRtcPluginManager &WebRtcPluginManager::Instance() {
@@ -1853,7 +1922,37 @@ void push_batch_plugin(SocketHelper& sender, const WebRtcArgs &args, const onCre
     }
 }
 
-static void setWebRtcArgs(const WebRtcArgs &args, WebRtcInterface &rtc) {
+static string getWebRtcSessionType(const string &source, const string &type) {
+    if (source == "whep" && type == "play") {
+        return "whep_player";
+    }
+    if (source == "whip" && type == "push") {
+        return "whip_publisher";
+    }
+    if (source == "whip_batch" && type == "push_batch") {
+        return "whip_batch_publisher";
+    }
+    if (source == "webrtc_api") {
+        if (type == "play") {
+            return "webrtc_api_player";
+        }
+        if (type == "push") {
+            return "webrtc_api_publisher";
+        }
+    }
+    if (source == "websocket") {
+        if (type == "play") {
+            return "websocket_player";
+        }
+        if (type == "push") {
+            return "websocket_publisher";
+        }
+    }
+    return source.empty() ? type : source + "_" + type;
+}
+
+static void setWebRtcArgs(const WebRtcArgs &args, const string &type, WebRtcInterface &rtc) {
+    rtc.setSessionType(getWebRtcSessionType(args["session_source"], type));
     {
         static auto is_vaild_ip = [](const std::string &ip) -> bool {
             int a, b, c, d;
@@ -1907,7 +2006,7 @@ static void setWebRtcArgs(const WebRtcArgs &args, WebRtcInterface &rtc) {
     }
 }
 
-float WebRtcTransport::getTimeOutSec() {
+float WebRtcTransport::getTimeOutSec() const {
     GET_CONFIG(uint32_t, timeout, Rtc::kTimeOutSec);
     if (timeout <= 0) {
         WarnL << "config rtc. " << Rtc::kTimeOutSec << ": " << timeout << " not vaild";
@@ -1928,7 +2027,7 @@ static onceToken s_rtc_auto_register([]() {
     WebRtcPluginManager::Instance().registerPlugin("talk", play_plugin<WebRtcTalk>);
 
     WebRtcPluginManager::Instance().setListener([](SocketHelper& sender, const std::string &type, const WebRtcArgs &args, const WebRtcInterface &rtc) {
-        setWebRtcArgs(args, const_cast<WebRtcInterface&>(rtc));
+        setWebRtcArgs(args, type, const_cast<WebRtcInterface&>(rtc));
     });
 });
 

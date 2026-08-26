@@ -65,6 +65,16 @@ Json::Value BatchPublishSessionManager::getSessionInfo(const string &app, const 
     return data;
 }
 
+Json::Value BatchPublishSessionManager::getSessionSummary(const string &app, const string &nvr_id) const {
+    auto session = getSession(app, nvr_id);
+    Json::Value data;
+    data["exists"] = !!session;
+    if (session) {
+        data["session"] = session->getSummary();
+    }
+    return data;
+}
+
 string BatchPublishSessionManager::makeKey(const string &app, const string &nvr_id) {
     return app + "/" + nvr_id;
 }

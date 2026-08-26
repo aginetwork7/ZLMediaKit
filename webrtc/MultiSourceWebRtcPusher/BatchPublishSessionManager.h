@@ -31,6 +31,7 @@ public:
     bool getSourceBinding(const std::string &source_id, BatchPublishSession::SourceBinding &binding, std::string &session_key) const;
 
     Json::Value getSessionInfo(const std::string &app, const std::string &nvr_id) const;
+    Json::Value getSessionSummary(const std::string &app, const std::string &nvr_id) const;
 
 private:
     static std::string makeKey(const std::string &app, const std::string &nvr_id);

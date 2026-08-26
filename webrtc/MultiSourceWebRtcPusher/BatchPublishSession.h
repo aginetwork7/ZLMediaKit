@@ -76,6 +76,8 @@ public:
     bool onRtp(TrackType type, const std::string &mid, uint32_t ssrc, uint64_t stamp_ms, const RtpPacket::Ptr &rtp);
 
     Json::Value getInfo() const;
+    Json::Value getSummary() const;
+    std::vector<std::string> getBoundSourceIds() const;
     bool getSourceBinding(const std::string &source_id, SourceBinding &binding) const;
 
     const std::string &getApp() const;

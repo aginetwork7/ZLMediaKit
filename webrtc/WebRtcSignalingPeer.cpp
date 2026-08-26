@@ -406,7 +406,7 @@ void WebRtcSignalingPeer::handleCallRequest(SIGNALING_MSG_ARGS) {
         return;
     }
 
-    auto args = std::make_shared<WebRtcArgsImp<Json::Value>>(allArgs, allArgs[GUEST_ID_KEY]);
+    auto args = std::make_shared<WebRtcArgsImp<Json::Value>>(allArgs, allArgs[GUEST_ID_KEY], "websocket");
     std::weak_ptr<WebRtcSignalingPeer> weak_self = std::static_pointer_cast<WebRtcSignalingPeer>(shared_from_this());
     WebRtcPluginManager::Instance().negotiateSdp(*this, allArgs[TYPE_KEY], *args, [allArgs, weak_self](const WebRtcInterface &exchanger) mutable {
         if (auto strong_self = weak_self.lock()) {

@@ -280,6 +280,41 @@ Json::Value BatchPublishSession::getInfo() const {
     return data;
 }
 
+Json::Value BatchPublishSession::getSummary() const {
+    lock_guard<recursive_mutex> lck(_mtx);
+    Json::Value data;
+    data["app"] = _app;
+    data["stream"] = _nvr_id;
+    data["transportId"] = _transport_id;
+    data["streamCount"] = (Json::UInt64)_stream_count;
+    data["state"] = sessionStateToStr(_state);
+    data["freeStreamCount"] = (Json::UInt64)_free_stream_ids.size();
+
+    Json::UInt64 bound_count = 0;
+    Json::UInt64 receiving_count = 0;
+    for (const auto &stream : _streams) {
+        if (stream.state == StreamState::Bound || stream.state == StreamState::Receiving) {
+            ++bound_count;
+        }
+        if (stream.receiving) {
+            ++receiving_count;
+        }
+    }
+    data["boundStreamCount"] = bound_count;
+    data["receivingStreamCount"] = receiving_count;
+    return data;
+}
+
+vector<string> BatchPublishSession::getBoundSourceIds() const {
+    lock_guard<recursive_mutex> lck(_mtx);
+    vector<string> source_ids;
+    source_ids.reserve(_source_bindings.size());
+    for (const auto &binding : _source_bindings) {
+        source_ids.emplace_back(binding.first);
+    }
+    return source_ids;
+}
+
 bool BatchPublishSession::getSourceBinding(const string &source_id, SourceBinding &binding) const {
     lock_guard<recursive_mutex> lck(_mtx);
     auto it = _source_bindings.find(source_id);

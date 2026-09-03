@@ -49,7 +49,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         cmake -G Ninja \
             -DENABLE_PYTHON=false \
             -DCMAKE_BUILD_TYPE=${MODEL} \
-            -DENABLE_WEBRTC=false \
+            -DENABLE_WEBRTC=true \
             -DENABLE_FFMPEG=true \
             -DENABLE_TESTS=false \
             -DENABLE_API=false \

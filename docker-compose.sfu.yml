@@ -13,10 +13,4 @@ services:
       - SYS_NICE
     ulimits:
       rtprio: 99
-    ports:
-      - "8089:8089"
-      - "554:554"
-      - "8449:8449"
-    volumes:
-      - /data/agi7/zlmediakit/log:/opt/media/bin/log
     restart: unless-stopped

@@ -83,13 +83,16 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
 
 WORKDIR /opt/media/bin/
 COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/MediaServer /opt/media/ZLMediaKit/default.pem /opt/media/bin/
+COPY --from=build /usr/local/lib/libsrtp2.so.* /usr/local/lib/
+COPY --from=build /usr/lib/*/libusrsctp.so.* /usr/local/lib/
 COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/config.ini /opt/media/conf/config.ini
 COPY --from=build /opt/media/ZLMediaKit/conf/config.media.ini /opt/media/conf/config.media.ini
 COPY --from=build /opt/media/ZLMediaKit/conf/config.sfu.ini /opt/media/conf/config.sfu.ini
 COPY --from=build /opt/media/ZLMediaKit/www/ /opt/media/bin/www/
 COPY --from=build /opt/media/ZLMediaKit/tools/record_zlm_resources.sh /opt/media/bin/
 COPY docker-entrypoint.sh /opt/media/bin/docker-entrypoint.sh
-RUN chmod +x /opt/media/bin/record_zlm_resources.sh /opt/media/bin/docker-entrypoint.sh
+RUN ldconfig && \
+    chmod +x /opt/media/bin/record_zlm_resources.sh /opt/media/bin/docker-entrypoint.sh
 
 ENV PATH=/opt/media/bin:$PATH
 ENTRYPOINT ["/opt/media/bin/docker-entrypoint.sh"]

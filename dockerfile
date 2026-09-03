@@ -23,6 +23,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
          ca-certificates \
          tzdata \
          libssl-dev \
+		 libusrsctp-dev \
          gcc \
          g++ \
          gdb && \

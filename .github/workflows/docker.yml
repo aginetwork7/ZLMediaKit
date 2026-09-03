@@ -71,12 +71,12 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: MODEL=Release
           cache-from: |
-            type=gha,scope=zlm-linux-arm64-release
+            type=gha,scope=zlm-linux-multiarch-release
             type=registry,ref=${{ vars.IMAGES_REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
           cache-to: |
-            type=gha,scope=zlm-linux-arm64-release,mode=max
+            type=gha,scope=zlm-linux-multiarch-release,mode=max
             type=registry,ref=${{ vars.IMAGES_REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
-          platforms: linux/arm64
+          platforms: linux/amd64,linux/arm64
 
       # Sign the resulting Docker image digest except on PRs.
       # This will only write to the public Rekor transparency log when the Docker

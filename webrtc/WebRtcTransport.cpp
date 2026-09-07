@@ -1861,6 +1861,7 @@ template<typename Type>
 void play_plugin(SocketHelper &sender, const WebRtcArgs &args, const onCreateWebRtc &cb) {
 
     MediaInfo info(args["url"]);
+	info.authorization = args["Authorization"].data();
     auto session_ptr = static_pointer_cast<Session>(sender.shared_from_this());
     Broadcast::AuthInvoker invoker = [cb, info, session_ptr](const string &err) mutable {
         if (!err.empty()) {
@@ -1898,6 +1899,7 @@ void play_plugin(SocketHelper &sender, const WebRtcArgs &args, const onCreateWeb
 
 void push_batch_plugin(SocketHelper& sender, const WebRtcArgs &args, const onCreateWebRtc &cb) {
     MediaInfo info(args["url"]);
+    info.authorization = args["Authorization"].data();
     auto stream_count = (size_t)std::max<int>(atoi(std::string(args["streamCount"]).data()), 1);
 
     if (BatchPublishSessionManager::Instance().getSession(info.app, info.stream)) {

@@ -236,7 +236,12 @@ void MP4Recorder::resetTracks() {
 // Recursively scan for orphan temp mp4 files caused by power failure or abnormal exit and recover them
 static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped) {
     auto pDir = opendir(dir.c_str());
-    if (!pDir) return;
+    if (!pDir) {
+        // 目录不存在或不可读，记录一下，避免恢复逻辑静默失效
+        // Directory missing or unreadable, log it so the recovery never fails silently
+        DebugL << "Skip orphan scan, cannot open dir: " << dir << ", error: " << strerror(errno);
+        return;
+    }
     while (auto entry = readdir(pDir)) {
         string name = entry->d_name;
         if (name == "." || name == "..") continue;
@@ -311,15 +316,51 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
 void MP4Recorder::recoverOrphanRecordings() {
     GET_CONFIG(string, recordPath, Protocol::kMP4SavePath);
     GET_CONFIG(string, recordAppName, Record::kAppName);
+    GET_CONFIG(bool, enableVhost, General::kEnableVhost);
     if (recordPath.empty()) {
         return;
     }
 
     auto absPath = File::absolutePath("", recordPath);
-    auto filePath = recordAppName + "/";
-    auto recoverRoot = File::absolutePath(filePath, absPath);
+    if (absPath.empty()) {
+        return;
+    }
+    if (absPath.back() != '/') {
+        absPath.push_back('/');
+    }
     int recovered = 0, skipped = 0;
-    recoverOrphansInDir(recoverRoot, recovered, skipped);
+
+    // 恢复起点必须与 Recorder::getRecordPath 的目录布局保持一致：
+    // Recovery roots must match the directory layout used by Recorder::getRecordPath:
+    //   enableVhost=1: <recordPath>/<vhost>/<recordApp>/<app>/<stream>/<date>/
+    //   enableVhost=0: <recordPath>/<recordApp>/<app>/<stream>/<date>/
+    if (enableVhost) {
+        // 遍历一级 vhost 目录，逐个扫描其下的 <recordApp> 子树
+        // Iterate the first-level vhost dirs and scan the <recordApp> subtree under each
+        auto pDir = opendir(absPath.c_str());
+        if (!pDir) {
+            DebugL << "Skip orphan scan, cannot open record root: " << absPath << ", error: " << strerror(errno);
+            return;
+        }
+        while (auto entry = readdir(pDir)) {
+            string name = entry->d_name;
+            if (name == "." || name == "..") {
+                continue;
+            }
+            auto vhost_dir = absPath + name + "/";
+            struct stat lst;
+            // 用 lstat 跳过符号链接，避免跟随链接跑到录像目录之外
+            // Use lstat to skip symlinks so we never follow one outside the record dir
+            if (lstat(vhost_dir.c_str(), &lst) != 0 || S_ISLNK(lst.st_mode) || !S_ISDIR(lst.st_mode)) {
+                continue;
+            }
+            recoverOrphansInDir(File::absolutePath(recordAppName + "/", vhost_dir), recovered, skipped);
+        }
+        closedir(pDir);
+    } else {
+        recoverOrphansInDir(File::absolutePath(recordAppName + "/", absPath), recovered, skipped);
+    }
+
     if (recovered > 0 || skipped > 0) {
         InfoL << "Orphan recording recovery complete: recovered=" << recovered << ", skipped=" << skipped;
     }

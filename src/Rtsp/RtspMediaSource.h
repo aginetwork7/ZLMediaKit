@@ -179,7 +179,9 @@ public:
 
     void clearCache() override{
         PacketCache<RtpPacket>::clearCache();
-        _ring->clearCache();
+        if (_ring) {
+            _ring->clearCache();
+        }
     }
 
 private:

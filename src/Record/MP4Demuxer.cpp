@@ -11,7 +11,9 @@
 #ifdef ENABLE_MP4
 
 #include <algorithm>
+#include <ctime>
 #include "MP4Demuxer.h"
+#include "RecordFileName.h"
 #include "Util/File.h"
 #include "Util/logger.h"
 #include "Extension/Factory.h"
@@ -20,6 +22,20 @@ using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
+
+static uint64_t getDurationFromRecordFileName(const string &file) {
+    auto pos = file.rfind('/');
+    auto name = (pos == string::npos) ? file : file.substr(pos + 1);
+    time_t start_sec = 0;
+    time_t end_sec = 0;
+    if (!parseRecordFileName(name, start_sec, end_sec)) {
+        return 0;
+    }
+    if (end_sec <= start_sec) {
+        return 0;
+    }
+    return (uint64_t)(end_sec - start_sec) * 1000;
+}
 
 MP4Demuxer::~MP4Demuxer() {
     closeMP4();
@@ -212,9 +228,21 @@ void MultiMP4Demuxer::openMP4(const string &files_string) {
     for (auto &file : files) {
         auto demuxer = std::make_shared<MP4Demuxer>();
         demuxer->openMP4(file);
+        auto file_duration_ms = demuxer->getDurationMS();
+        if (!file_duration_ms) {
+            file_duration_ms = getDurationFromRecordFileName(file);
+            if (file_duration_ms) {
+                WarnL << "fallback duration from filename for fmp4: " << file << ", duration_ms=" << file_duration_ms;
+            } else {
+                // Keep timeline monotonic to avoid dropping files by duplicate map key.
+                file_duration_ms = 1;
+                WarnL << "invalid mp4 duration, use 1ms fallback: " << file;
+            }
+        }
         _demuxers.emplace(duration_ms, demuxer);
-        duration_ms += demuxer->getDurationMS();
+        duration_ms += file_duration_ms;
     }
+    _total_duration_ms = duration_ms;
     CHECK(!_demuxers.empty());
     _it = _demuxers.begin();
     for (auto &track : _it->second->getTracks(false)) {
@@ -226,13 +254,14 @@ void MultiMP4Demuxer::openMP4(const string &files_string) {
 }
 
 uint64_t MultiMP4Demuxer::getDurationMS() const {
-    return _demuxers.empty() ? 0 : _demuxers.rbegin()->first + _demuxers.rbegin()->second->getDurationMS();
+    return _total_duration_ms;
 }
 
 void MultiMP4Demuxer::closeMP4() {
     _demuxers.clear();
     _it = _demuxers.end();
     _tracks.clear();
+    _total_duration_ms = 0;
 }
 
 int64_t MultiMP4Demuxer::seekTo(int64_t stamp_ms) {

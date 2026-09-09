@@ -55,6 +55,7 @@ if (ENABLE_MP4)
   add_library(mov STATIC ${MOV_SRC_LIST})
   add_library(MediaServer::mov ALIAS mov)
   target_compile_options(mov PRIVATE ${COMPILE_OPTIONS_DEFAULT})
+  target_compile_definitions(mov PRIVATE MOV_READER_FMP4_FAST=1)
   target_include_directories(mov
           PRIVATE
           "$<BUILD_INTERFACE:${MediaServer_MOV_ROOT}/include>"

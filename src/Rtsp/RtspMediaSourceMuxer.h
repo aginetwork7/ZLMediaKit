@@ -50,6 +50,15 @@ public:
         _media_src->setTimeStamp(stamp);
     }
 
+    void setRtpExtTimeBaseMS(uint64_t base_ms) {
+        RtspMuxer::setRtpExtTimeBaseMS(base_ms);
+    }
+
+    void dropCachedFrame() {
+        RtspMuxer::dropCachedFrame();
+        _media_src->clearCache();
+    }
+
     void addTrackCompleted() override {
         RtspMuxer::addTrackCompleted();
         _media_src->setSdp(getSdp());

@@ -27,6 +27,10 @@
 #include "WebApi.h"
 #include "WebHook.h"
 
+#if defined(ENABLE_MP4)
+#include "Record/MP4Recorder.h"
+#endif
+
 #if defined(ENABLE_WEBRTC)
 #include "../webrtc/WebRtcTransport.h"
 #include "../webrtc/WebRtcSession.h"
@@ -416,6 +420,9 @@ int start_main(int argc,char *argv[]) {
 #endif //defined(ENABLE_SRT)
 
         installWebApi();
+#if defined(ENABLE_MP4)
+        MP4Recorder::recoverOrphanRecordings();
+#endif
         InfoL << "已启动http api 接口";
         installWebHook();
         InfoL << "已启动http hook 接口";

@@ -36,6 +36,7 @@ public:
     using onAuth = std::function<void(bool encrypted, const std::string &pwd_or_md5)>;
 
     RtspSession(const toolkit::Socket::Ptr &sock);
+    ~RtspSession() override;
     ////Session override////
     void onRecv(const toolkit::Buffer::Ptr &buf) override;
     void onError(const toolkit::SockException &err) override;
@@ -180,6 +181,9 @@ private:
     // 校验md5方式的认证加密  [AUTO-TRANSLATED:0cc37fa7]
     // Verify MD5 authentication encryption
     void onAuthDigest(const std::string &realm, const std::string &auth_md5);
+    // 校验SHA-256方式的认证加密  [AUTO-TRANSLATED:0cc37fa7]
+    // Verify SHA-256 authentication encryption
+    void onAuthSha256(const std::string &realm, const std::string &auth_sha256, const std::string &method);
     // 触发url鉴权事件  [AUTO-TRANSLATED:776dc4b5]
     // Trigger URL authentication event
     void emitOnPlay();
@@ -222,6 +226,7 @@ private:
     // 登录认证  [AUTO-TRANSLATED:43fdb875]
     // Login authentication
     std::string _auth_nonce;
+    std::string _auth_opaque;
     // 用于判断客户端是否超时  [AUTO-TRANSLATED:86cb328a]
     // Used to determine if the client has timed out
     toolkit::Ticker _alive_ticker;
@@ -269,6 +274,15 @@ private:
     // 统计rtp并发送rtcp  [AUTO-TRANSLATED:0ac2b665]
     // Count RTP and send RTCP
     std::vector<RtcpContext::Ptr> _rtcp_context;
+
+    // seek诊断：用于确认seek后是否真的开始发送新时间点的数据
+    bool _seek_probe_pending = false;
+    uint32_t _seek_probe_req_ms = 0;
+    uint32_t _seek_probe_actual_ms = 0;
+
+    // 真实 active 播放会话配额持有标记（进入 PLAY 后置位，析构时归还）
+    bool _play_quota_acquired = false;
+    bool _play_quota_is_replay = false;
 };
 
 /**

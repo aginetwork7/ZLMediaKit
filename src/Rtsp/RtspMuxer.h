@@ -72,6 +72,10 @@ public:
      */
     RtpRing::RingType::Ptr getRtpRing() const;
 
+    // Set absolute time base (Unix ms) for RTP extension timestamp generation.
+    // When set, extension time is computed as base + current RTP NPT(ms).
+    void setRtpExtTimeBaseMS(uint64_t base_ms);
+
     /**
      * 添加ready状态的track
      * Add a ready state track
@@ -99,6 +103,11 @@ public:
     void flush() override;
 
     /**
+     * seek后重置编码器内部缓存，避免输出旧时间点残帧
+     */
+    void dropCachedFrame();
+
+    /**
      * 重置所有track
      * Reset all tracks
      
@@ -110,6 +119,8 @@ public:
 private:
     void onRtp(RtpPacket::Ptr in, bool is_key);
     void trySyncTrack();
+    uint64_t calcRtpExtTimeMS(const RtpPacket::Ptr &in) const;
+    void injectRtpExtUnixSec(RtpPacket::Ptr &in, uint32_t unix_sec) const;
 
 private:
     bool _live = true;
@@ -117,6 +128,8 @@ private:
 
     uint8_t _index {0};
     uint64_t _ntp_stamp_start;
+    uint64_t _rtp_ext_time_base_ms = 0;
+    bool _video_ext_bootstrapped = false;
     std::string _sdp;
 
     struct TrackInfo {

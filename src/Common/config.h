@@ -395,6 +395,15 @@ namespace Rtsp {
 // 是否优先base64方式认证？默认Md5方式认证  [AUTO-TRANSLATED:0ea332b5]
 // Is base64 authentication prioritized? Default is Md5 authentication
 extern const std::string kAuthBasic;
+// 是否开启严格SHA-256认证，开启后仅允许Digest SHA-256  [AUTO-TRANSLATED:0ea332b5]
+// Whether to enable strict SHA-256 authentication. When enabled, only Digest SHA-256 is allowed
+extern const std::string kAuthStrictSha256;
+// RTSP鉴权用户文件路径，JSON格式: {"username":"x","password":"x"}
+// RTSP auth user file path, JSON format: {"username":"x","password":"x"}
+extern const std::string kAuthFile;
+// RTSP鉴权realm，配合kAuthFile使用
+// RTSP auth realm, used with kAuthFile
+extern const std::string kAuthRealm;
 // 握手超时时间，默认15秒  [AUTO-TRANSLATED:6f69a65b]
 // Handshake timeout, default 15 seconds
 extern const std::string kHandshakeSecond;
@@ -425,6 +434,15 @@ extern const std::string kLowLatency;
 // 迫使客户端重新SETUP并切换到对应协议。目前支持FFMPEG和VLC  [AUTO-TRANSLATED:45f9cddb]
 // Force the client to re-SETUP and switch to the corresponding protocol. Currently supports FFMPEG and VLC
 extern const std::string kRtpTransportType;
+// RTSP最大播放会话数，0为不限制
+// Maximum number of concurrent RTSP player sessions, 0 means unlimited
+extern const std::string kMaxSessionCount;
+// RTSP最大回放会话数，0为不限制
+// Maximum number of concurrent RTSP replay sessions, 0 means unlimited
+extern const std::string kMaxReplaySessionCount;
+// 回放会话使用的 app 名称，默认 replay
+// App name used by replay sessions, default is replay
+extern const std::string kReplayAppName;
 } // namespace Rtsp
 
 // //////////RTMP服务器配置///////////  [AUTO-TRANSLATED:8de6f41f]

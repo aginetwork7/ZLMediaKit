@@ -1,8 +1,6 @@
 name: issue_lint
 
-on:
-  issues:
-    types: [opened]
+on: workflow_dispatch
 
 jobs:
   issue_lint:

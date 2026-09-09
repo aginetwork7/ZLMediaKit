@@ -10,10 +10,15 @@
 
 #ifdef ENABLE_MP4
 #include <ctime>
+#include <cerrno>
+#include <cstring>
 #include <sys/stat.h>
+#include <dirent.h>
 #include "Util/File.h"
 #include "Common/config.h"
 #include "MP4Recorder.h"
+#include "MP4Demuxer.h"
+#include "RecordFileName.h"
 #include "Thread/WorkThreadPool.h"
 #include "MP4Muxer.h"
 
@@ -21,6 +26,20 @@ using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
+
+static string getUTCTimeStr(const char *fmt) {
+    auto now = ::time(nullptr);
+    struct tm tm = {};
+    if (!gmtime_r(&now, &tm)) {
+        return "";
+    }
+    char buf[128] = {0};
+    auto len = std::strftime(buf, sizeof(buf), fmt, &tm);
+    if (len == 0) {
+        return "";
+    }
+    return std::string(buf, len);
+}
 
 MP4Recorder::MP4Recorder(const MediaTuple &tuple, const string &path, size_t max_second) {
     // ///record 业务逻辑//////  [AUTO-TRANSLATED:2e78931a]
@@ -42,8 +61,9 @@ MP4Recorder::~MP4Recorder() {
 
 void MP4Recorder::createFile() {
     closeFile();
-    auto date = getTimeStr("%Y-%m-%d");
-    auto file_name = date + "-" + getTimeStr("%H-%M-%S") + "-" + std::to_string(_file_index++) + ".mp4";
+    _warned_non_g711_audio_for_file = false;
+    auto date = getUTCTimeStr("%Y-%m-%d");
+    auto file_name = date + "-" + getUTCTimeStr("%H-%M-%S") + "-" + std::to_string(_file_index++) + ".mp4";
     auto full_path = _info.folder + date + "/" + file_name;
     auto full_path_tmp = _info.folder + date + "/." + file_name;
 
@@ -76,7 +96,8 @@ void MP4Recorder::asyncClose() {
     auto info = _info;
     TraceL << "Start close tmp mp4 file: " << full_path_tmp;
     WorkThreadPool::Instance().getExecutor()->async([muxer, full_path_tmp, info]() mutable {
-        info.time_len = muxer->getDuration() / 1000.0f;
+        auto duration_ms = muxer->getDuration();
+        info.time_len = duration_ms / 1000.0f;
         // 关闭mp4可能非常耗时，所以要放在后台线程执行  [AUTO-TRANSLATED:a7378a11]
         // Closing mp4 can be very time-consuming, so it should be executed in the background thread
         TraceL << "Closing tmp mp4 file: " << full_path_tmp;
@@ -92,9 +113,48 @@ void MP4Recorder::asyncClose() {
                 File::delete_file(full_path_tmp);
                 return;
             }
+
+            // 根据实际录制时长计算 End 时间，重建文件名为 start_end 格式
+            // Compute end time from actual duration, rebuild filename with start_end scheme
+            // 半开区间 [Begin, End)：End = Start + 截断秒数，且至少为 Start + 1
+            // Half-open interval [Begin, End): End = Start + truncated seconds, at least Start + 1
+            time_t duration_sec = (time_t)(duration_ms / 1000);
+            if (duration_sec < 1) {
+                duration_sec = 1;
+            }
+            time_t end_time = info.start_time + duration_sec;
+
+            // 从原始文件名提取 file index（最后一个 '-' 与 '.mp4' 之间的部分）
+            // Extract file index from original filename (between last '-' and '.mp4')
+            auto dot_pos = info.file_name.rfind(kRecordFileSuffix);
+            auto dash_pos = (dot_pos != std::string::npos) ? info.file_name.rfind('-', dot_pos) : std::string::npos;
+            std::string index_str = "0";
+            if (dash_pos != std::string::npos && dot_pos != std::string::npos) {
+                index_str = info.file_name.substr(dash_pos + 1, dot_pos - dash_pos - 1);
+            }
+
+            auto new_name = makeRecordFileName(info.start_time, end_time, index_str);
+
+            // 用新文件名替换 info 中的路径
+            // Replace paths in info with new filename
+            auto old_name_pos = info.file_path.rfind(info.file_name);
+            if (old_name_pos != std::string::npos) {
+                info.file_path = info.file_path.substr(0, old_name_pos) + new_name;
+            }
+            auto old_url_pos = info.url.rfind(info.file_name);
+            if (old_url_pos != std::string::npos) {
+                info.url = info.url.substr(0, old_url_pos) + new_name;
+            }
+            info.file_name = new_name;
+
             // 临时文件名改成正式文件名，防止mp4未完成时被访问  [AUTO-TRANSLATED:541a6f00]
             // Change the temporary file name to the official file name to prevent access to the mp4 before it is completed
-            rename(full_path_tmp.data(), info.file_path.data());
+            if (0 != ::rename(full_path_tmp.c_str(), info.file_path.c_str())) {
+                WarnL << "finalize mp4 rename failed: " << full_path_tmp
+                      << " -> " << info.file_path
+                      << ", err=" << strerror(errno);
+                return;
+            }
         }
         TraceL << "Emit mp4 record event: " << info.file_path;
         // 触发mp4录制切片生成事件  [AUTO-TRANSLATED:9959dcd4]
@@ -117,6 +177,15 @@ void MP4Recorder::flush() {
 }
 
 bool MP4Recorder::inputFrame(const Frame::Ptr &frame) {
+    if (frame->getTrackType() == TrackAudio && !isG711Codec(frame->getCodecId())) {
+        if (!_warned_non_g711_audio_for_file) {
+            WarnL << "-----mp4 record: skip non-G711 audio, file will contain no audio, codec="
+                  << getCodecName(frame->getCodecId()) << ", file=" << _info.file_name;
+            _warned_non_g711_audio_for_file = true;
+        }
+        return false;
+    }
+
     auto stamp_inc = _delta_stamp[frame->getTrackType()].relativeStamp(frame->pts(), false);
     if (!_muxer || (stamp_inc > int64_t(_max_second) * 1000 && (!_have_video || frame->keyFrame()))) {
         // 成立条件  [AUTO-TRANSLATED:8c9c6083]
@@ -142,6 +211,11 @@ bool MP4Recorder::inputFrame(const Frame::Ptr &frame) {
 }
 
 bool MP4Recorder::addTrack(const Track::Ptr &track) {
+    if (track->getTrackType() == TrackAudio && !isG711Codec(track->getCodecId())) {
+        // Keep MP4 recording audio codec deterministic: only accept G711 tracks.
+        return true;
+    }
+
     // 保存所有的track，为创建MP4MuxerFile做准备  [AUTO-TRANSLATED:815c2486]
     // Save all tracks in preparation for creating MP4MuxerFile
     _tracks.emplace_back(track);
@@ -155,6 +229,143 @@ void MP4Recorder::resetTracks() {
     closeFile();
     _tracks.clear();
     _have_video = false;
+    _warned_non_g711_audio_for_file = false;
+}
+
+// 递归扫描目录中断电或异常退出导致的孤儿临时mp4文件并恢复
+// Recursively scan for orphan temp mp4 files caused by power failure or abnormal exit and recover them
+static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped) {
+    auto pDir = opendir(dir.c_str());
+    if (!pDir) {
+        // 目录不存在或不可读，记录一下，避免恢复逻辑静默失效
+        // Directory missing or unreadable, log it so the recovery never fails silently
+        DebugL << "Skip orphan scan, cannot open dir: " << dir << ", error: " << strerror(errno);
+        return;
+    }
+    while (auto entry = readdir(pDir)) {
+        string name = entry->d_name;
+        if (name == "." || name == "..") continue;
+        string path = dir + "/" + name;
+
+        // 用 lstat 避免跟随符号链接导致环路递归
+        struct stat lst;
+        if (lstat(path.c_str(), &lst) != 0) continue;
+        if (S_ISLNK(lst.st_mode)) continue;
+
+        if (S_ISDIR(lst.st_mode)) {
+            recoverOrphansInDir(path, recovered, skipped);
+            continue;
+        }
+        // 只处理隐藏的 mp4 临时文件
+        if (name[0] != '.' || name.size() <= kRecordFileSuffixLen + 1 ||
+            name.compare(name.size() - kRecordFileSuffixLen, kRecordFileSuffixLen, kRecordFileSuffix) != 0) {
+            continue;
+        }
+
+        // 临时文件名解析复用 RecordFileName.h 中的单一定义，避免与 producer(createFile)/
+        // consumer(replay catalog) 的命名规则漂移；名字不符合规则的隐藏 mp4 仍然按既有策略删除。
+        // The temp-name parsing reuses the single definition in RecordFileName.h so it cannot drift
+        // from the producer (createFile) or the consumer (replay catalog); a hidden mp4 that does
+        // not match the scheme is still deleted, as before.
+        time_t start_time = 0;
+        string index_str;
+        if (!parseTempRecordFileName(name, start_time, &index_str)) {
+            WarnL << "Orphan file has unexpected name format, deleting: " << path;
+            File::delete_file(path);
+            continue;
+        }
+
+        try {
+            MP4Demuxer demuxer;
+            demuxer.openMP4(path);
+            auto duration_ms = demuxer.getDurationMS();
+            demuxer.closeMP4();
+
+            time_t duration_sec = (time_t)(duration_ms / 1000);
+            if (duration_sec < 1) {
+                duration_sec = 1;
+            }
+            time_t end_time = start_time + duration_sec;
+
+            auto new_name = makeRecordFileName(start_time, end_time, index_str);
+            auto new_path = dir + "/" + new_name;
+            struct stat dst_st = {};
+            if (::stat(new_path.c_str(), &dst_st) == 0) {
+                WarnL << "Recovery target exists, skip to keep idempotent: " << new_path;
+                ++skipped;
+                continue;
+            }
+            if (0 == ::rename(path.c_str(), new_path.c_str())) {
+                InfoL << "Recovered orphan recording: " << path << " -> " << new_path;
+                ++recovered;
+            } else {
+                // 带上 errno，并计入 skipped：否则权限/文件系统故障会让启动汇总少报受影响文件
+                // Carry errno and count it as skipped, otherwise permission / filesystem failures are
+                // under-reported by the startup summary
+                WarnL << "Failed to rename orphan recording: " << path << " -> " << new_path
+                      << ", err=" << strerror(errno);
+                ++skipped;
+            }
+        } catch (std::exception &ex) {
+            // 不删除：可能是权限问题或临时 IO 错误，下次启动可重试
+            WarnL << "Cannot open orphan recording, skipping: " << path << ", error: " << ex.what();
+            ++skipped;
+        }
+    }
+    closedir(pDir);
+}
+
+void MP4Recorder::recoverOrphanRecordings() {
+    GET_CONFIG(string, recordPath, Protocol::kMP4SavePath);
+    GET_CONFIG(string, recordAppName, Record::kAppName);
+    GET_CONFIG(bool, enableVhost, General::kEnableVhost);
+    if (recordPath.empty()) {
+        return;
+    }
+
+    auto absPath = File::absolutePath("", recordPath);
+    if (absPath.empty()) {
+        return;
+    }
+    if (absPath.back() != '/') {
+        absPath.push_back('/');
+    }
+    int recovered = 0, skipped = 0;
+
+    // 恢复起点必须与 Recorder::getRecordPath 的目录布局保持一致：
+    // Recovery roots must match the directory layout used by Recorder::getRecordPath:
+    //   enableVhost=1: <recordPath>/<vhost>/<recordApp>/<app>/<stream>/<date>/
+    //   enableVhost=0: <recordPath>/<recordApp>/<app>/<stream>/<date>/
+    if (enableVhost) {
+        // 遍历一级 vhost 目录，逐个扫描其下的 <recordApp> 子树
+        // Iterate the first-level vhost dirs and scan the <recordApp> subtree under each
+        auto pDir = opendir(absPath.c_str());
+        if (!pDir) {
+            DebugL << "Skip orphan scan, cannot open record root: " << absPath << ", error: " << strerror(errno);
+            return;
+        }
+        while (auto entry = readdir(pDir)) {
+            string name = entry->d_name;
+            if (name == "." || name == "..") {
+                continue;
+            }
+            auto vhost_dir = absPath + name + "/";
+            struct stat lst;
+            // 用 lstat 跳过符号链接，避免跟随链接跑到录像目录之外
+            // Use lstat to skip symlinks so we never follow one outside the record dir
+            if (lstat(vhost_dir.c_str(), &lst) != 0 || S_ISLNK(lst.st_mode) || !S_ISDIR(lst.st_mode)) {
+                continue;
+            }
+            recoverOrphansInDir(File::absolutePath(recordAppName + "/", vhost_dir), recovered, skipped);
+        }
+        closedir(pDir);
+    } else {
+        recoverOrphansInDir(File::absolutePath(recordAppName + "/", absPath), recovered, skipped);
+    }
+
+    if (recovered > 0 || skipped > 0) {
+        InfoL << "Orphan recording recovery complete: recovered=" << recovered << ", skipped=" << skipped;
+    }
 }
 
 } /* namespace mediakit */

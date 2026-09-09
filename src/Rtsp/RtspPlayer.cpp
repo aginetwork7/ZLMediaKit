@@ -48,6 +48,8 @@ void RtspPlayer::sendTeardown() {
 
 void RtspPlayer::teardown() {
     sendTeardown();
+    _warned_unknown_pt = false;
+    _warned_unknown_interleaved = false;
     _md5_nonce.clear();
     _realm.clear();
     _sdp_track.clear();
@@ -829,7 +831,10 @@ int RtspPlayer::getTrackIndexByPT(int pt) const {
     if (_sdp_track.size() == 1) {
         return 0;
     }
-    WarnL << "no such track with pt:" << pt;
+    if (!_warned_unknown_pt) {
+        _warned_unknown_pt = true;
+        WarnL << "no such track with pt:" << pt << ", url=" << _play_url;
+    }
     return -1;
 }
 
@@ -842,7 +847,10 @@ int RtspPlayer::getTrackIndexByInterleaved(int interleaved) const {
     if (_sdp_track.size() == 1) {
         return 0;
     }
-    WarnL << "no such track with interleaved:" << interleaved;
+    if (!_warned_unknown_interleaved) {
+        _warned_unknown_interleaved = true;
+        WarnL << "no such track with interleaved:" << interleaved << ", url=" << _play_url;
+    }
     return -1;
 }
 

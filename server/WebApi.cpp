@@ -48,6 +48,7 @@
 #include "Pusher/PusherProxy.h"
 #include "Rtp/RtpProcess.h"
 #include "Record/MP4Reader.h"
+#include "Record/RecordFileName.h"
 
 #if defined(ENABLE_RTPPROXY)
 #include "Rtp/RtpServer.h"
@@ -1994,26 +1995,50 @@ void installWebApi() {
         }
 
         Json::Value paths(arrayValue);
-        // 这是筛选日期，获取文件夹列表  [AUTO-TRANSLATED:786fa49d]
-        // This is to filter the date and get the folder list
+        // 一次遍历同时收集两类条目
+        // 1) 常规条目(隐藏文件除外)：日级查询收 mp4 文件，月级查询收匹配日期的文件夹；
+        // 2) 隐藏的临时切片：日级查询时以虚拟 start_end 名暴露，使 query->replay 链路能用同一套
+        //    规则解析 begin/end，而 replay 内部仍读真实的临时文件。
+        // 临时切片先暂存，扫描结束后再追加，保持与此前「常规条目在前、临时切片在后」的输出顺序一致。
+        auto now_sec = time(nullptr);
+        vector<string> in_progress_names;
         File::scanDir(record_path, [&](const string &path, bool isDir) {
             auto pos = path.rfind('/');
-            if (pos != string::npos) {
-                string relative_path = path.substr(pos + 1);
-                if (search_mp4) {
-                    if (!isDir) {
-                        // 我们只收集mp4文件，对文件夹不感兴趣  [AUTO-TRANSLATED:254d9f25]
-                        // We only collect mp4 files, we are not interested in folders
-                        paths.append(relative_path);
-                    }
-                } else if (isDir && relative_path.find(period) == 0) {
-                    // 匹配到对应日期的文件夹  [AUTO-TRANSLATED:cd3d10b9]
-                    // Match the folder for the corresponding date
+            if (pos == string::npos) {
+                return true;
+            }
+            string relative_path = path.substr(pos + 1);
+            if (!relative_path.empty() && relative_path.front() == '.') {
+                if (!search_mp4 || isDir) {
+                    return true;
+                }
+                time_t start_sec = 0;
+                string index_str;
+                if (!parseTempRecordFileName(relative_path, start_sec, &index_str)) {
+                    return true;
+                }
+                if (now_sec <= start_sec) {
+                    return true;
+                }
+                in_progress_names.emplace_back(makeRecordFileName(start_sec, now_sec, index_str));
+                return true;
+            }
+            if (search_mp4) {
+                if (!isDir) {
+                    // 我们只收集mp4文件，对文件夹不感兴趣  [AUTO-TRANSLATED:254d9f25]
+                    // We only collect mp4 files, we are not interested in folders
                     paths.append(relative_path);
                 }
+            } else if (isDir && relative_path.find(period) == 0) {
+                // 匹配到对应日期的文件夹  [AUTO-TRANSLATED:cd3d10b9]
+                // Match the folder for the corresponding date
+                paths.append(relative_path);
             }
             return true;
-        }, false);
+        }, false, true);
+        for (auto &name : in_progress_names) {
+            paths.append(name);
+        }
 
         val["data"]["rootPath"] = record_path;
         val["data"]["paths"] = paths;

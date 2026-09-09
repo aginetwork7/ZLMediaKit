@@ -17,6 +17,95 @@ using namespace toolkit;
 
 namespace mediakit {
 
+void RtspMuxer::setRtpExtTimeBaseMS(uint64_t base_ms) {
+    _rtp_ext_time_base_ms = base_ms;
+    _video_ext_bootstrapped = false;
+}
+
+uint64_t RtspMuxer::calcRtpExtTimeMS(const RtpPacket::Ptr &in) const {
+    if (!in) {
+        return 0;
+    }
+
+    // Replay path: preserve media absolute timeline by using
+    // absolute base + continuous 64-bit session NPT(ms).
+    if (_rtp_ext_time_base_ms > 0) {
+        auto npt_ms = in->ntp_stamp;
+        return _rtp_ext_time_base_ms + npt_ms;
+    }
+
+    // Fallback for live/non-replay paths.
+    return in->ntp_stamp;
+}
+
+void RtspMuxer::injectRtpExtUnixSec(RtpPacket::Ptr &in, uint32_t unix_sec) const {
+    if (!in || unix_sec == 0) {
+        return;
+    }
+
+    auto header = in->getHeader();
+    if (!header) {
+        return;
+    }
+
+    // Update existing extension when it matches our reserved/id convention.
+    if (header->ext) {
+        auto ext_data = header->getExtData();
+        if (ext_data && header->getExtReserved() == 0 && header->getExtSize() >= 4) {
+            auto sec_be = htonl(unix_sec);
+            memcpy(ext_data, &sec_be, sizeof(sec_be));
+        }
+        return;
+    }
+
+    auto old_size = in->size();
+    if (old_size < RtpPacket::kRtpTcpHeaderSize + RtpPacket::kRtpHeaderSize) {
+        return;
+    }
+
+    auto payload_start = RtpPacket::kRtpTcpHeaderSize + RtpPacket::kRtpHeaderSize + header->getCsrcSize();
+    if (payload_start > old_size) {
+        return;
+    }
+
+    constexpr size_t kExtBlockSize = 8; // reserved(2) + len(2) + unix_sec(4)
+    auto new_size = old_size + kExtBlockSize;
+    auto payload_size = old_size - payload_start;
+
+    auto out = RtpPacket::create();
+    out->setCapacity(new_size);
+    out->setSize(new_size);
+
+    auto src = reinterpret_cast<const uint8_t *>(in->data());
+    auto dst = reinterpret_cast<uint8_t *>(out->data());
+
+    memcpy(dst, src, payload_start);
+
+    auto out_header = out->getHeader();
+    out_header->ext = 1;
+
+    auto ext_ptr = dst + payload_start;
+    // ext reserved/id = 0, ext words length = 1 (4 bytes)
+    ext_ptr[0] = 0;
+    ext_ptr[1] = 0;
+    ext_ptr[2] = 0;
+    ext_ptr[3] = 1;
+    auto sec_be = htonl(unix_sec);
+    memcpy(ext_ptr + 4, &sec_be, sizeof(sec_be));
+
+    memcpy(ext_ptr + kExtBlockSize, src + payload_start, payload_size);
+
+    auto tcp_payload_len = static_cast<uint16_t>(new_size - RtpPacket::kRtpTcpHeaderSize);
+    dst[2] = (tcp_payload_len >> 8) & 0xFF;
+    dst[3] = tcp_payload_len & 0xFF;
+
+    out->type = in->type;
+    out->sample_rate = in->sample_rate;
+    out->ntp_stamp = in->ntp_stamp;
+    out->track_index = in->track_index;
+    in = std::move(out);
+}
+
 void RtspMuxer::onRtp(RtpPacket::Ptr in, bool is_key) {
     if (_live) {
         auto &ref = _tracks[in->track_index];
@@ -35,10 +124,27 @@ void RtspMuxer::onRtp(RtpPacket::Ptr in, bool is_key) {
         // RTP interception entry, set NTP here uniformly
         in->ntp_stamp = ref.ntp_stamp;
     } else {
-        // 点播情况下设置ntp时间戳为rtp时间戳加基准ntp时间戳  [AUTO-TRANSLATED:b9f77de4]
-        // In on-demand scenarios, set the NTP timestamp to the RTP timestamp plus the base NTP timestamp
-        in->ntp_stamp = _ntp_stamp_start + (in->getStamp() * uint64_t(1000) / in->sample_rate);
+        if (_rtp_ext_time_base_ms == 0) {
+            // 非replay点播沿用原有逻辑。replay下保留编码阶段写入的64位NPT(ms)，避免32位RTP时间戳回绕。
+            in->ntp_stamp = _ntp_stamp_start + (in->sample_rate ? (in->getStamp() * uint64_t(1000) / in->sample_rate) : 0);
+        }
     }
+
+    // Inject Unix timestamp extension for replay video packets.
+    // Only inject on the first video packet and key frames.
+    if (in->type == TrackVideo && _rtp_ext_time_base_ms > 0) {
+        auto ext_ms = calcRtpExtTimeMS(in);
+        if (ext_ms > 0) {
+            auto ext_sec = static_cast<uint32_t>(ext_ms / 1000);
+            auto header = in->getHeader();
+            auto has_ext = header && header->ext && header->getExtReserved() == 0 && header->getExtSize() >= 4;
+            if (has_ext || !_video_ext_bootstrapped || is_key) {
+                injectRtpExtUnixSec(in, ext_sec);
+                _video_ext_bootstrapped = true;
+            }
+        }
+    }
+
     _rtpRing->write(std::move(in), is_key);
 }
 
@@ -162,6 +268,14 @@ void RtspMuxer::flush() {
     }
 }
 
+void RtspMuxer::dropCachedFrame() {
+    for (auto &pr : _tracks) {
+        if (pr.second.encoder) {
+            pr.second.encoder->dropCachedFrame();
+        }
+    }
+}
+
 string RtspMuxer::getSdp() {
     return _sdp;
 }
@@ -173,6 +287,7 @@ RtpRing::RingType::Ptr RtspMuxer::getRtpRing() const {
 void RtspMuxer::resetTracks() {
     _sdp.clear();
     _tracks.clear();
+    _video_ext_bootstrapped = false;
     CLEAR_ARR(_track_existed);
 }
 

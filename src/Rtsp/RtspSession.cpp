@@ -8,8 +8,9 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
-#include <atomic>
+#include <fstream>
 #include <iomanip>
+#include <sys/stat.h>
 #include "Common/config.h"
 #include "UDPServer.h"
 #include "RtspSession.h"
@@ -17,11 +18,97 @@
 #include "Util/base64.h"
 #include "RtpMultiCaster.h"
 #include "Rtcp/RtcpContext.h"
+#include "json/json.h"
+
+#ifdef ENABLE_OPENSSL
+#include <openssl/sha.h>
+#endif
 
 using namespace std;
 using namespace toolkit;
 
 namespace mediakit {
+
+struct RtspAuthFileCache {
+    string path;
+    string username;
+    string password;
+    time_t mtime = 0;
+    off_t size = -1;
+    bool loaded = false;
+};
+
+static RtspAuthFileCache g_rtspAuthFileCache;
+static recursive_mutex g_mtxRtspAuthFileCache;
+
+static bool getFileStat(const string &path, time_t &mtime, off_t &size) {
+    struct stat st = {0};
+    if (::stat(path.c_str(), &st) != 0) {
+        return false;
+    }
+    mtime = st.st_mtime;
+    size = st.st_size;
+    return true;
+}
+
+// Load RTSP auth credentials from a JSON file.
+// File format: {"username":"xxx","password":"xxx"}
+static bool loadRtspAuthFile(const string &path, string &username, string &password) {
+    if (path.empty()) {
+        ErrorL << "rtsp authFile path is empty";
+        return false;
+    }
+
+    lock_guard<recursive_mutex> lock(g_mtxRtspAuthFileCache);
+    auto &cache = g_rtspAuthFileCache;
+    auto same_path = cache.loaded && cache.path == path;
+
+    time_t mtime = 0;
+    off_t size = -1;
+    if (!getFileStat(path, mtime, size)) {
+        auto err = errno;
+        ErrorL << "rtsp authFile stat failed: " << path << ", errno=" << err << "(" << strerror(err) << ")";
+        return false;
+    }
+
+    if (same_path && cache.mtime == mtime && cache.size == size) {
+        username = cache.username;
+        password = cache.password;
+        return true;
+    }
+
+    ifstream ifs(path);
+    if (!ifs.is_open()) {
+        auto err = errno;
+        ErrorL << "rtsp authFile open failed: " << path << ", errno=" << err << "(" << strerror(err) << ")";
+        return false;
+    }
+
+    Json::Value root;
+    Json::CharReaderBuilder builder;
+    string errs;
+    if (!Json::parseFromStream(builder, ifs, &root, &errs)) {
+        ErrorL << "rtsp authFile parse failed: " << path << ", err: " << errs;
+        return false;
+    }
+
+    auto new_username = root["username"].asString();
+    auto new_password = root["password"].asString();
+    if (new_username.empty() || new_password.empty()) {
+        ErrorL << "rtsp authFile missing username/password: " << path;
+        return false;
+    }
+
+    cache.path = path;
+    cache.username = std::move(new_username);
+    cache.password = std::move(new_password);
+    cache.mtime = mtime;
+    cache.size = size;
+    cache.loaded = true;
+    username = cache.username;
+    password = cache.password;
+    return true;
+}
 
 /**
  * rtsp协议有多种方式传输rtp数据包，目前已支持包括以下4种
@@ -51,9 +138,80 @@ static unordered_map<string, weak_ptr<RtspSession> > g_mapGetter;
 //对g_mapGetter上锁保护
 static recursive_mutex g_mtxGetter;
 
+// 对两个等长的十六进制摘要做常量时间、忽略大小写的比较，避免 strcasecmp 提前返回
+// 而通过比较耗时泄漏「已匹配前缀长度」的时序侧信道。
+static bool digestEquals(const string &a, const string &b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    unsigned char diff = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        diff |= (unsigned char)(tolower((unsigned char)a[i]) ^ tolower((unsigned char)b[i]));
+    }
+    return diff == 0;
+}
+
+#ifdef ENABLE_OPENSSL
+static string sha256Hex(const string &input) {
+    unsigned char out[SHA256_DIGEST_LENGTH];
+    if (!SHA256((const unsigned char *)input.data(), input.size(), out)) {
+        return "";
+    }
+    static constexpr char kHex[] = "0123456789abcdef";
+    string ret;
+    ret.resize(SHA256_DIGEST_LENGTH * 2);
+    for (size_t i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+        ret[i * 2] = kHex[out[i] >> 4];
+        ret[i * 2 + 1] = kHex[out[i] & 0x0F];
+    }
+    return ret;
+}
+#endif
+
+// 真实 active 播放会话配额：only 进入 PLAY 的会话才计数（DESCRIBE/SETUP 不算）。
+// g_play_total 为 live+replay 总数，replay 另受 g_play_replay 约束；0 表示不限制。
+// 两个计数需原子事务（replay 要同时满足两个上限）
+static std::mutex g_mtxPlayQuota;
+static size_t g_play_total = 0;
+static size_t g_play_replay = 0;
+
+static bool acquirePlayQuota(bool is_replay) {
+    GET_CONFIG(int, max_total, Rtsp::kMaxSessionCount);
+    GET_CONFIG(int, max_replay, Rtsp::kMaxReplaySessionCount);
+    std::lock_guard<std::mutex> lck(g_mtxPlayQuota);
+    if (max_total > 0 && g_play_total >= (size_t)max_total) {
+        return false;
+    }
+    if (is_replay && max_replay > 0 && g_play_replay >= (size_t)max_replay) {
+        return false;
+    }
+    ++g_play_total;
+    if (is_replay) {
+        ++g_play_replay;
+    }
+    return true;
+}
+
+static void releasePlayQuota(bool is_replay) {
+    std::lock_guard<std::mutex> lck(g_mtxPlayQuota);
+    if (g_play_total > 0) {
+        --g_play_total;
+    }
+    if (is_replay && g_play_replay > 0) {
+        --g_play_replay;
+    }
+}
+
 RtspSession::RtspSession(const Socket::Ptr &sock) : Session(sock) {
     GET_CONFIG(uint32_t,keep_alive_sec,Rtsp::kKeepAliveSecond);
     sock->setSendTimeOutSecond(keep_alive_sec);
+}
+
+RtspSession::~RtspSession() {
+    // 析构是唯一能覆盖所有退出路径（TEARDOWN/断连/异常）的释放点，保证配额不泄漏。
+    if (_play_quota_acquired) {
+        releasePlayQuota(_play_quota_is_replay);
+    }
 }
 
 void RtspSession::onError(const SockException &err) {
@@ -384,23 +542,29 @@ void RtspSession::handleReq_Describe(const Parser &parser) {
                 return;
             }
             if (realm.empty()) {
-                //无需rtsp专属认证, 那么继续url通用鉴权认证(on_play)
-                strong_self->emitOnPlay();
+                //realm为空，鉴权失败
+                strong_self->onAuthFailed("unknown", "realm is empty, auth rejected");
                 return;
             }
-            //该流需要rtsp专属认证，开启rtsp专属认证后，将不再触发url通用鉴权认证(on_play)
             strong_self->_rtsp_realm = realm;
             strong_self->onAuthUser(realm, authorization);
         });
     };
 
-    if(_rtsp_realm.empty()){
-        //广播是否需要rtsp专属认证事件
-        if (!NOTICE_EMIT(BroadcastOnGetRtspRealmArgs, Broadcast::kBroadcastOnGetRtspRealm, _media_info, invoker, *this)) {
-            //无人监听此事件，说明无需认证
-            invoker("");
+    if (_rtsp_realm.empty()) {
+        GET_CONFIG(string, auth_file, Rtsp::kAuthFile);
+        if (auth_file.empty()) {
+            // 未配置 authFile 时，realm 由 kBroadcastOnGetRtspRealm 决定；无监听者则回落 invoker("")，
+            // 交给上面统一的空 realm 处理逻辑。
+            if (!NOTICE_EMIT(BroadcastOnGetRtspRealmArgs, Broadcast::kBroadcastOnGetRtspRealm, _media_info, invoker, *this)) {
+                invoker("");
+            }
+            return;
         }
-    }else{
+        GET_CONFIG(string, auth_realm, Rtsp::kAuthRealm);
+        //realm配置为空时使用默认值
+        invoker(auth_realm.empty() ? "tinynvr" : auth_realm);
+    } else {
         invoker(_rtsp_realm);
     }
 }
@@ -421,7 +585,8 @@ void RtspSession::onAuthSuccess() {
             return;
         }
         //找到了相应的rtsp流
-        strong_self->_sdp_track = SdpParser(rtsp_src->getSdp()).getAvailableTrack();
+        SdpParser sdp_parser(rtsp_src->getSdp());
+        strong_self->_sdp_track = sdp_parser.getAvailableTrack();
         if (strong_self->_sdp_track.empty()) {
             //该流无效
             WarnL << "sdp中无有效track，该流无效:" << rtsp_src->getSdp();
@@ -429,6 +594,18 @@ void RtspSession::onAuthSuccess() {
             strong_self->shutdown(SockException(Err_shutdown,"can not find any available track in sdp"));
             return;
         }
+
+        auto base_url = strong_self->_content_base;
+        for (auto &track : strong_self->_sdp_track) {
+            auto control = track->_type == TrackVideo ? "video" : "audio";
+            track->_control = base_url + "/" + control;
+            auto range = track->_attr.equal_range("control");
+            if (range.first != range.second) {
+                track->_attr.erase(range.first, range.second);
+            }
+            track->_attr.emplace("control", track->_control);
+        }
+
         strong_self->_rtcp_context.clear();
         for (auto &track : strong_self->_sdp_track) {
             strong_self->_rtcp_context.emplace_back(std::make_shared<RtcpContextForSend>());
@@ -445,19 +622,20 @@ void RtspSession::onAuthSuccess() {
                                      {"Content-Base", strong_self->_content_base + "/",
                                       "x-Accept-Retransmit","our-retransmit",
                                       "x-Accept-Dynamic-Rate","1"
-                                     },rtsp_src->getSdp());
+                                     },sdp_parser.toString());
     });
 }
 
 void RtspSession::onAuthFailed(const string &realm,const string &why,bool close) {
-    GET_CONFIG(bool, authBasic, Rtsp::kAuthBasic);
-    if (!authBasic) {
-        // 我们需要客户端优先以md5方式认证
-        _auth_nonce = makeRandStr(32);
-        sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Digest realm=\"" << realm << "\",nonce=\"" << _auth_nonce << "\"" });
+    GET_CONFIG(bool, strict_sha256, Rtsp::kAuthStrictSha256);
+    //只使用digest模式；严格模式只发SHA-256 challenge，非严格模式也发SHA-256 challenge但接受MD5 fallback
+    _auth_nonce = encodeBase64(makeRandStr(16, false));
+    _auth_opaque = encodeBase64(makeRandStr(16, false));
+    if (strict_sha256) {
+        sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Digest realm=\"" << realm << "\",nonce=\"" << _auth_nonce << "\",algorithm=SHA-256,qop=\"auth\",opaque=\"" << _auth_opaque << "\"" });
     } else {
-        // 当然我们也支持base64认证,但是我们不建议这样做
-        sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Basic realm=\"" << realm << "\"" });
+        //非严格模式：发SHA-256 challenge，客户端不支持SHA-256时会fallback到MD5响应，onAuthUser中接受两种
+        sendRtspResponse("401 Unauthorized", { "WWW-Authenticate", StrPrinter << "Digest realm=\"" << realm << "\",nonce=\"" << _auth_nonce << "\",qop=\"auth\",opaque=\"" << _auth_opaque << "\"" });
     }
     if (close) {
         shutdown(SockException(Err_shutdown, StrPrinter << "401 Unauthorized:" << why));
@@ -519,25 +697,28 @@ void RtspSession::onAuthDigest(const string &realm,const string &auth_md5){
     }
     //check realm
     if(realm != map["realm"]){
-        onAuthFailed(realm,StrPrinter << "realm not mached:" << realm << " != " << map["realm"]);
+        onAuthFailed(realm,StrPrinter << "realm not matched:" << realm << " != " << map["realm"]);
         return ;
     }
     //check nonce
     auto nonce = map["nonce"];
     if(_auth_nonce != nonce){
-        onAuthFailed(realm,StrPrinter << "nonce not mached:" << nonce << " != " << _auth_nonce);
+        onAuthFailed(realm,StrPrinter << "nonce not matched:" << nonce << " != " << _auth_nonce);
         return ;
     }
     //check username and uri
     auto username = map["username"];
     auto uri = map["uri"];
     auto response = map["response"];
+    auto qop = map["qop"];
+    auto nc = map["nc"];
+    auto cnonce = map["cnonce"];
     if(username.empty() || uri.empty() || response.empty()){
         onAuthFailed(realm,StrPrinter << "username/uri/response empty:" << username << "," << uri << "," << response);
         return ;
     }
 
-    auto realInvoker = [this,realm,nonce,uri,username,response](bool ignoreAuth,bool encrypted,const string &good_pwd){
+    auto realInvoker = [this,realm,nonce,uri,username,response,qop,nc,cnonce](bool ignoreAuth,bool encrypted,const string &good_pwd){
         if(ignoreAuth){
             //忽略认证
             TraceP(this) << "auth ignored";
@@ -558,9 +739,17 @@ void RtspSession::onAuthDigest(const string &realm,const string &auth_md5){
             encrypted_pwd = MD5(username+ ":" + realm + ":" + good_pwd).hexdigest();
         }
 
-        auto good_response = MD5( encrypted_pwd + ":" + nonce + ":" + MD5(string("DESCRIBE") + ":" + uri).hexdigest()).hexdigest();
-        if(strcasecmp(good_response.data(),response.data()) == 0){
-            //认证成功！md5不区分大小写
+        auto ha2 = MD5(string("DESCRIBE") + ":" + uri).hexdigest();
+        string good_response;
+        if (!qop.empty() && !nc.empty() && !cnonce.empty() && strcasecmp(qop.data(), "auth") == 0) {
+            // RFC2617: qop=auth 时需包含 nc/cnonce/qop 参与摘要计算
+            good_response = MD5(encrypted_pwd + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2).hexdigest();
+        } else {
+            // 兼容未携带 qop 的老客户端
+            good_response = MD5(encrypted_pwd + ":" + nonce + ":" + ha2).hexdigest();
+        }
+        if(digestEquals(good_response, response)){
+            //认证成功！md5摘要为十六进制，比较时容忍大小写
             onAuthSuccess();
         }else{
             //认证失败！
@@ -585,12 +774,141 @@ void RtspSession::onAuthDigest(const string &realm,const string &auth_md5){
     };
 
     //此时可以提供明文或md5加密的密码
+    GET_CONFIG(string, auth_file_digest, Rtsp::kAuthFile);
+    if (!auth_file_digest.empty()) {
+        string file_user, file_pwd;
+        if (!loadRtspAuthFile(auth_file_digest, file_user, file_pwd)) {
+            onAuthFailed(realm, "rtsp authFile load failed or credentials empty");
+            return;
+        }
+        if (username != file_user) {
+            onAuthFailed(realm, StrPrinter << "username mismatch: " << username << " != " << file_user);
+            return;
+        }
+        invoker(false, file_pwd);
+        return;
+    }
     if(!NOTICE_EMIT(BroadcastOnRtspAuthArgs, Broadcast::kBroadcastOnRtspAuth, _media_info, realm, username, false, invoker, *this)){
         //表明该流需要认证却没监听请求密码事件，这一般是大意的程序所为，警告之
         WarnP(this) << "请监听kBroadcastOnRtspAuth事件！";
-        //但是我们还是忽略认证以便完成播放
-        realInvoker(true,true,"");
+        onAuthFailed(realm, "kBroadcastOnRtspAuth listener not found");
     }
+}
+
+void RtspSession::onAuthSha256(const string &realm, const string &auth_sha256, const string &method) {
+#ifndef ENABLE_OPENSSL
+    onAuthFailed(realm, "sha-256 auth requires ENABLE_OPENSSL");
+    return;
+#else
+    DebugP(this) << auth_sha256;
+    auto mapTmp = Parser::parseArgs(auth_sha256, ",", "=");
+    decltype(mapTmp) map;
+    for (auto &pr : mapTmp) {
+        map[trim(string(pr.first), " \"")] = trim(pr.second, " \"");
+    }
+    // check realm
+    if (realm != map["realm"]) {
+        onAuthFailed(realm, StrPrinter << "realm not matched:" << realm << " != " << map["realm"]);
+        return;
+    }
+    // check nonce
+    auto nonce = map["nonce"];
+    if (_auth_nonce != nonce) {
+        onAuthFailed(realm, StrPrinter << "nonce not matched:" << nonce << " != " << _auth_nonce);
+        return;
+    }
+    // check opaque
+    auto opaque = map["opaque"];
+    if (!_auth_opaque.empty() && _auth_opaque != opaque) {
+        onAuthFailed(realm, StrPrinter << "opaque not matched:" << opaque << " != " << _auth_opaque);
+        return;
+    }
+    // check username and uri
+    auto username = map["username"];
+    auto uri = map["uri"];
+    auto response = map["response"];
+    auto qop = map["qop"];
+    auto nc = map["nc"];
+    auto cnonce = map["cnonce"];
+    if (!response.empty() && response.size() != 64) {
+        WarnP(this) << "client digest response length is invalid for sha-256, len=" << response.size() << ", auth=" << auth_sha256;
+        onAuthFailed(realm, StrPrinter << "invalid sha-256 digest response length:" << response.size());
+        return;
+    }
+    if (username.empty() || uri.empty() || response.empty()) {
+        WarnP(this) << "client digest fields incomplete for sha-256, auth=" << auth_sha256;
+        onAuthFailed(realm, StrPrinter << "username/uri/response empty:" << username << "," << uri << "," << response);
+        return;
+    }
+
+    auto realInvoker = [this, realm, nonce, uri, username, response, qop, nc, cnonce, method](bool ignoreAuth, bool encrypted, const string &good_pwd) {
+        if (ignoreAuth) {
+            // 忽略认证
+            TraceP(this) << "auth ignored";
+            onAuthSuccess();
+            return;
+        }
+
+        // Digest SHA-256与MD5流程一致，仅哈希算法替换为SHA-256
+        auto encrypted_pwd = good_pwd;
+        if (!encrypted) {
+            // 提供的是明文密码
+            encrypted_pwd = sha256Hex(username + ":" + realm + ":" + good_pwd);
+        }
+
+        auto ha2 = sha256Hex(method + ":" + uri);
+        string good_response;
+        if (!qop.empty() && !nc.empty() && !cnonce.empty() && strcasecmp(qop.data(), "auth") == 0) {
+            good_response = sha256Hex(encrypted_pwd + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2);
+        } else {
+            // 宽松模式：兼容未携带qop/nc/cnonce的客户端
+            good_response = sha256Hex(encrypted_pwd + ":" + nonce + ":" + ha2);
+        }
+        if (digestEquals(good_response, response)) {
+            // 认证成功！SHA-256 摘要输出为小写十六进制，比较时容忍客户端大写
+            onAuthSuccess();
+        } else {
+            // 认证失败！
+            onAuthFailed(realm, StrPrinter << "password mismatch when sha256 auth:" << good_response << " != " << response);
+        }
+    };
+
+    weak_ptr<RtspSession> weak_self = static_pointer_cast<RtspSession>(shared_from_this());
+    onAuth invoker = [realInvoker, weak_self](bool encrypted, const string &good_pwd) {
+        auto strong_self = weak_self.lock();
+        if (!strong_self) {
+            return;
+        }
+        // 切换到自己的线程确保realInvoker执行时，this指针有效
+        strong_self->async([realInvoker, weak_self, encrypted, good_pwd]() {
+            auto strong_self = weak_self.lock();
+            if (!strong_self) {
+                return;
+            }
+            realInvoker(false, encrypted, good_pwd);
+        });
+    };
+
+    // 此时可以提供明文或sha256加密的密码
+    GET_CONFIG(string, auth_file_sha256, Rtsp::kAuthFile);
+    if (!auth_file_sha256.empty()) {
+        string file_user, file_pwd;
+        if (!loadRtspAuthFile(auth_file_sha256, file_user, file_pwd)) {
+            onAuthFailed(realm, "rtsp authFile load failed or credentials empty");
+            return;
+        }
+        if (username != file_user) {
+            onAuthFailed(realm, StrPrinter << "username mismatch: " << username << " != " << file_user);
+            return;
+        }
+        invoker(false, file_pwd);
+        return;
+    }
+    if (!NOTICE_EMIT(BroadcastOnRtspAuthArgs, Broadcast::kBroadcastOnRtspAuth, _media_info, realm, username, false, invoker, *this)) {
+        WarnP(this) << "请监听kBroadcastOnRtspAuth事件！";
+        onAuthFailed(realm, "kBroadcastOnRtspAuth listener not found");
+    }
+#endif
 }
 
 void RtspSession::onAuthUser(const string &realm,const string &authorization){
@@ -607,11 +925,34 @@ void RtspSession::onAuthUser(const string &realm,const string &authorization){
         return;
     }
     if(authType == "Basic"){
-        //base64认证，需要明文密码
-        onAuthBasic(realm,authStr);
+        //只允许digest模式，拒绝basic
+        WarnP(this) << "client uses basic auth but server only accepts digest";
+        onAuthFailed(realm, "basic auth is disabled, only digest is allowed");
     }else if(authType == "Digest"){
-        //md5认证
-        onAuthDigest(realm,authStr);
+        GET_CONFIG(bool, strict_sha256, Rtsp::kAuthStrictSha256);
+        auto mapTmp = Parser::parseArgs(authStr, ",", "=");
+        auto algorithm = trim(string(mapTmp["algorithm"]), " \"");
+        auto response = trim(string(mapTmp["response"]), " \"");
+        if (strict_sha256) {
+            //严格模式：只允许SHA-256
+            if (algorithm.empty() || strcasecmp(algorithm.data(), "SHA-256") == 0) {
+                onAuthSha256(realm, authStr, "DESCRIBE");
+            } else {
+                onAuthFailed(realm, StrPrinter << "unsupported digest algorithm:" << algorithm << ", strict SHA-256 required");
+            }
+        } else {
+            // 非严格模式：仅当客户端明确声明 SHA-256 且响应长度匹配时走 SHA-256，
+            // 其余情况(未声明/MD5/未知算法)统一回退 MD5 路径。
+            // Non-strict mode: take the SHA-256 path only when the client explicitly announces
+            // SHA-256 with a matching response length; everything else (absent / MD5 / unknown
+            // algorithm) falls back to the MD5 path.
+            const bool client_wants_sha256 = strcasecmp(algorithm.data(), "SHA-256") == 0 && response.size() == 64;
+            if (client_wants_sha256) {
+                onAuthSha256(realm, authStr, "DESCRIBE");
+            } else {
+                onAuthDigest(realm, authStr);
+            }
+        }
     }else{
         //其他认证方式？不支持！
         onAuthFailed(realm,StrPrinter << "unsupported auth type:" << authType);
@@ -799,28 +1140,58 @@ void RtspSession::handleReq_Play(const Parser &parser) {
         return;
     }
 
-    bool use_gop = true;
+    // 真实 active 播放会话配额：仅在首次进入 PLAY 时占用（seek/暂停恢复会重入本函数，用标记防重）。
+    if (!_play_quota_acquired) {
+        GET_CONFIG(string, replay_app, Rtsp::kReplayAppName);
+        auto is_replay = play_src->getMediaTuple().app == replay_app;
+        if (!acquirePlayQuota(is_replay)) {
+            sendRtspResponse("503 Service Unavailable", {"Connection", "Close"});
+            shutdown(SockException(Err_shutdown, "play session limit reached"));
+            return;
+        }
+        _play_quota_acquired = true;
+        _play_quota_is_replay = is_replay;
+    }
+
+    // seek 会重建 reader，必须始终从 GOP 缓存起播，否则会错过 seek 期间已写入的关键帧。
+    const bool use_gop = true;
     auto &strScale = parser["Scale"];
+    auto &strSpeed = parser["Speed"];
     auto &strRange = parser["Range"];
     StrCaseMap res_header;
+    string speed_header_name;
+    string speed_value;
     if (!strScale.empty()) {
-        //这是设置播放速度
-        res_header.emplace("Scale", strScale);
-        auto speed = atof(strScale.data());
+        speed_header_name = "Scale";
+        speed_value = strScale;
+    } else if (!strSpeed.empty()) {
+        speed_header_name = "Speed";
+        speed_value = strSpeed;
+    }
+    if (!speed_header_name.empty()) {
+        //播放速度，兼容Scale与Speed两种头
+        auto speed = atof(speed_value.data());
         play_src->speed(speed);
-        InfoP(this) << "rtsp set play speed:" << speed;
+        res_header.emplace(speed_header_name, speed_value);
+        InfoP(this) << "rtsp set play speed via " << speed_header_name << ":" << speed;
     }
 
     if (!strRange.empty()) {
         //这是seek操作
-        res_header.emplace("Range", strRange);
         auto strStart = findSubString(strRange.data(), "npt=", "-");
         if (strStart == "now") {
             strStart = "0";
         }
         auto iStartTime = 1000 * (float) atof(strStart.data());
-        use_gop = !play_src->seekTo((uint32_t) iStartTime);
-        InfoP(this) << "rtsp seekTo(ms):" << iStartTime;
+        auto seek_ok = play_src->seekTo((uint32_t) iStartTime);
+        auto actual_ms = play_src->getTimeStamp(TrackInvalid);
+        _seek_probe_req_ms = (uint32_t)iStartTime;
+        _seek_probe_actual_ms = actual_ms;
+        _seek_probe_pending = seek_ok;
+        InfoP(this) << "rtsp seekTo(ms):" << iStartTime
+                    << ", seek_ok:" << seek_ok
+                    << ", actual_ms:" << actual_ms
+                    << ", delta_ms:" << ((int64_t)actual_ms - (int64_t)iStartTime);
     }
 
     vector<TrackType> inited_tracks;
@@ -843,8 +1214,8 @@ void RtspSession::handleReq_Play(const Parser &parser) {
     rtp_info.pop_back();
 
     res_header.emplace("RTP-Info", rtp_info);
-    //已存在Range时不覆盖
-    res_header.emplace("Range", StrPrinter << "npt=" << setiosflags(ios::fixed) << setprecision(2) << play_src->getTimeStamp(TrackInvalid) / 1000.0);
+    //PLAY响应中的Range统一回写为实际播放起点，避免透传请求值导致协议语义不一致
+    res_header["Range"] = StrPrinter << "npt=" << setiosflags(ios::fixed) << setprecision(2) << play_src->getTimeStamp(TrackInvalid) / 1000.0;
     sendRtspResponse("200 OK", res_header);
 
     //设置播放track
@@ -857,6 +1228,11 @@ void RtspSession::handleReq_Play(const Parser &parser) {
     play_src->pause(false);
 
     setSocketFlags();
+
+    if (!strRange.empty() && _play_reader && _rtp_type != Rtsp::RTP_MULTICAST) {
+        // seek后重建ring reader，避免旧读游标/缓存导致客户端画面不推进。
+        _play_reader = nullptr;
+    }
 
     if (!_play_reader && _rtp_type != Rtsp::RTP_MULTICAST) {
         weak_ptr<RtspSession> weak_self = static_pointer_cast<RtspSession>(shared_from_this());
@@ -1245,6 +1621,16 @@ void RtspSession::sendRtpPacket(const RtspMediaSource::RingDataType &pkt) {
             setSendFlushFlag(false);
             pkt->for_each([&](const RtpPacket::Ptr &rtp) {
                 if (_target_play_track == TrackInvalid || _target_play_track == rtp->type) {
+                    if (_seek_probe_pending) {
+                        auto rtp_ms = rtp->sample_rate ? (rtp->getStamp() * uint64_t(1000) / rtp->sample_rate) : 0;
+                        InfoP(this) << "rtsp seek probe first RTP(tcp):"
+                                    << " req_ms=" << _seek_probe_req_ms
+                                    << ", actual_ms=" << _seek_probe_actual_ms
+                                    << ", seq=" << rtp->getSeq()
+                                    << ", rtp_ms=" << rtp_ms
+                                    << ", track=" << rtp->type;
+                        _seek_probe_pending = false;
+                    }
                     updateRtcpContext(rtp);
                     send(rtp);
                 }
@@ -1260,6 +1646,16 @@ void RtspSession::sendRtpPacket(const RtspMediaSource::RingDataType &pkt) {
             rtp_socks[TrackAudio] = _rtp_socks[getTrackIndexByTrackType(TrackAudio)];
             pkt->for_each([&](const RtpPacket::Ptr &rtp) {
                 if (_target_play_track == TrackInvalid || _target_play_track == rtp->type) {
+                    if (_seek_probe_pending) {
+                        auto rtp_ms = rtp->sample_rate ? (rtp->getStamp() * uint64_t(1000) / rtp->sample_rate) : 0;
+                        InfoP(this) << "rtsp seek probe first RTP(udp):"
+                                    << " req_ms=" << _seek_probe_req_ms
+                                    << ", actual_ms=" << _seek_probe_actual_ms
+                                    << ", seq=" << rtp->getSeq()
+                                    << ", rtp_ms=" << rtp_ms
+                                    << ", track=" << rtp->type;
+                        _seek_probe_pending = false;
+                    }
                     updateRtcpContext(rtp);
                     auto &sock = rtp_socks[rtp->type];
                     if (!sock) {

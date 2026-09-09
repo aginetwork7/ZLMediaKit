@@ -242,21 +242,33 @@ static onceToken token([]() { mINI::Instance()[kMaxReqSize] = 1024; });
 namespace Rtsp {
 #define RTSP_FIELD "rtsp."
 const string kAuthBasic = RTSP_FIELD "authBasic";
+const string kAuthStrictSha256 = RTSP_FIELD "authStrictSha256";
+const string kAuthFile = RTSP_FIELD "authFile";
+const string kAuthRealm = RTSP_FIELD "authRealm";
 const string kHandshakeSecond = RTSP_FIELD "handshakeSecond";
 const string kKeepAliveSecond = RTSP_FIELD "keepAliveSecond";
 const string kDirectProxy = RTSP_FIELD "directProxy";
 const string kLowLatency = RTSP_FIELD"lowLatency";
 const string kRtpTransportType = RTSP_FIELD"rtpTransportType";
+const string kMaxSessionCount = RTSP_FIELD"maxSessionCount";
+const string kMaxReplaySessionCount = RTSP_FIELD"maxReplaySessionCount";
+const string kReplayAppName = RTSP_FIELD"replayAppName";
 
 static onceToken token([]() {
     // 默认Md5方式认证  [AUTO-TRANSLATED:6155d989]
     // Default Md5 authentication
     mINI::Instance()[kAuthBasic] = 0;
+    mINI::Instance()[kAuthStrictSha256] = 0;
+    mINI::Instance()[kAuthFile] = "";
+    mINI::Instance()[kAuthRealm] = "tinynvr";
     mINI::Instance()[kHandshakeSecond] = 15;
     mINI::Instance()[kKeepAliveSecond] = 15;
     mINI::Instance()[kDirectProxy] = 1;
     mINI::Instance()[kLowLatency] = 0;
     mINI::Instance()[kRtpTransportType] = -1;
+    mINI::Instance()[kMaxSessionCount] = 0;
+    mINI::Instance()[kMaxReplaySessionCount] = 0;
+    mINI::Instance()[kReplayAppName] = "replay";
 });
 } // namespace Rtsp
 

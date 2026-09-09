@@ -361,6 +361,10 @@ void H264RtpEncoder::flush() {
     }
 }
 
+void H264RtpEncoder::dropCachedFrame() {
+    _last_frame = nullptr;
+}
+
 bool H264RtpEncoder::inputFrame_l(const Frame::Ptr &frame, bool is_mark){
     if (frame->keyFrame()) {
         // 保证每一个关键帧前都有SPS与PPS  [AUTO-TRANSLATED:9d1a9d5e]

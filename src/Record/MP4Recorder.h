@@ -30,6 +30,16 @@ public:
     ~MP4Recorder() override;
 
     /**
+     * 恢复孤儿录像文件：扫描录像目录中残留的隐藏临时文件，
+     * 读取实际时长后重命名为 start_end 格式的正式文件。
+     * 应在启动时、录像开始前调用。
+     * Recover orphan recording files: scan hidden temp files left in recording
+     * directory, read actual duration and rename to start_end format.
+     * Should be called at startup before any recording starts.
+     */
+    static void recoverOrphanRecordings();
+
+    /**
      * 重置所有Track
      * Reset all Tracks
      
@@ -69,6 +79,7 @@ private:
 
 private:
     bool _have_video = false;
+    bool _warned_non_g711_audio_for_file = false;
     size_t _max_second;
     DeltaStamp _delta_stamp[TrackMax];
     std::atomic<uint64_t> _file_index { 0 };

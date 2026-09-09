@@ -392,4 +392,8 @@ void H265RtpEncoder::flush() {
     }
 }
 
+void H265RtpEncoder::dropCachedFrame() {
+    _last_frame = nullptr;
+}
+
 }//namespace mediakit

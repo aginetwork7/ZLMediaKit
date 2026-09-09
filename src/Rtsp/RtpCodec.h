@@ -122,6 +122,9 @@ public:
      */
     virtual void setOpt(int opt, const toolkit::Any &param) {};
 
+    // 时间轴发生跳变后调用，用于丢弃编码器内部缓存的上一帧，避免输出旧时间点残帧。
+    virtual void dropCachedFrame() {}
+
 private:
     std::unique_ptr<RtpInfo> _rtp_info;
 };

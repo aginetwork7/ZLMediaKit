@@ -74,6 +74,24 @@ public:
         return true;
     }
 
+    void clearAndResync(uint64_t dts) {
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
+        _cache.clear();
+        _last_dts[0] = dts;
+        _last_dts[1] = dts;
+        _cache_ms = kMinCacheMS;
+        setCurrentStamp(dts);
+    }
+
+    void setSpeed(float speed) {
+        std::lock_guard<std::recursive_mutex> lck(_mtx);
+        if (!isfinite(speed) || speed <= 0) {
+            return;
+        }
+        setCurrentStamp(getCurrentStamp());
+        _speed = speed;
+    }
+
 private:
     void onTick() {
         std::lock_guard<std::recursive_mutex> lck(_mtx);
@@ -116,7 +134,7 @@ private:
         _cache_ms = kMinCacheMS;
     }
 
-    uint64_t getCurrentStamp() { return _ticker.elapsedTime() + _stamp_offset; }
+    uint64_t getCurrentStamp() { return (uint64_t)(_ticker.elapsedTime() * _speed) + _stamp_offset; }
 
     void setCurrentStamp(uint64_t stamp) {
         _stamp_offset = stamp;
@@ -126,6 +144,7 @@ private:
 private:
     uint32_t _paced_sender_ms;
     uint32_t _cache_ms = kMinCacheMS;
+    float _speed = 1.0f;
     uint64_t _stamp_offset = 0;
     uint64_t _last_dts[2] = {0, 0};
     OnFrame _cb;
@@ -294,6 +313,27 @@ void MultiMediaSourceMuxer::setTimeStamp(uint32_t stamp) {
     }
     if (_rtsp) {
         _rtsp->setTimeStamp(stamp);
+    }
+}
+
+void MultiMediaSourceMuxer::setRtpExtTimeBaseMS(uint64_t base_ms) {
+    if (_rtsp) {
+        _rtsp->setRtpExtTimeBaseMS(base_ms);
+    }
+}
+
+void MultiMediaSourceMuxer::setSpeed(float speed) {
+    if (_paced_sender) {
+        _paced_sender->setSpeed(speed);
+    }
+}
+
+void MultiMediaSourceMuxer::resetPacedSender(uint32_t stamp) {
+    if (_paced_sender) {
+        _paced_sender->clearAndResync(stamp);
+    }
+    if (_rtsp) {
+        _rtsp->dropCachedFrame();
     }
 }
 
@@ -644,7 +684,7 @@ EventPoller::Ptr MultiMediaSourceMuxer::getOwnerPoller(MediaSource &sender) {
     try {
         auto ret = listener->getOwnerPoller(sender);
         if (ret != _poller) {
-            WarnL << "OwnerPoller changed " << _poller->getThreadName() << " -> " << ret->getThreadName() << " : " << shortUrl();
+            WarnL << "OwnerPoller changed " << _poller->getThreadName() << " -> " << ret->getThreadName() /*<< " : " << shortUrl()*/;
             _poller = ret;
             if (_paced_sender) {
                 _paced_sender->resetTimer(_poller);

@@ -17,6 +17,8 @@
 #include "Common/Parser.h"
 #include "Common/MultiMediaSourceMuxer.h"
 #include "Record/MP4Reader.h"
+#include "RtspReplay/RtspReplaySourceFactory.h"
+#include "Thread/WorkThreadPool.h"
 #include "PacketCache.h"
 
 using namespace std;
@@ -384,15 +386,34 @@ static MediaSource::Ptr find_l(const string &schema, const string &vhost_in, con
 
 static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &session, bool retry,
                         const function<void(const MediaSource::Ptr &src)> &cb){
-    auto src = find_l(info.schema, info.vhost, info.app, info.stream, true);
+    weak_ptr<Session> weak_session = session;
+    // Continuation that performs the actual lookup. For replay it is invoked after the heavy
+    // catalog scan / openMP4 probe has finished off the request poller; for every other path it
+    // runs synchronously right below, identical to the original flow.
+    auto run_find = [info, weak_session, retry, cb](bool replay_mode, const string &replay_session_stream) {
+    auto strong_session = weak_session.lock();
+    if (!strong_session) {
+        cb(nullptr);
+        return;
+    }
+    GET_CONFIG(string, replay_app, Rtsp::kReplayAppName);
+    const string target_app = replay_mode ? replay_app : info.app;
+    const string target_stream = replay_mode ? replay_session_stream : info.stream;
+    const bool target_from_mp4 = !replay_mode;
+
+    auto find_target = [info, target_app, target_stream, target_from_mp4]() -> MediaSource::Ptr {
+        return MediaSource::find(info.schema, info.vhost, target_app, target_stream, target_from_mp4);
+    };
+
+    auto src = find_target();
     if (src || !retry) {
         cb(src);
         return;
     }
 
     GET_CONFIG(int, maxWaitMS, General::kMaxStreamWaitTimeMS);
-    void *listener_tag = session.get();
-    auto poller = session->getPoller();
+    void *listener_tag = strong_session.get();
+    auto poller = strong_session->getPoller();
     std::shared_ptr<atomic_flag> invoked(new atomic_flag{false});
     auto cb_once = [cb, invoked](const MediaSource::Ptr &src) {
         if (invoked->test_and_set()) {
@@ -420,25 +441,40 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
         NoticeCenter::Instance().delListener(listener_tag, Broadcast::kBroadcastMediaChanged);
     };
 
-    weak_ptr<Session> weak_session = session;
-    auto on_register = [weak_session, info, cb_once, cancel_all, poller](BroadcastMediaChangedArgs) {
-        if (!bRegist ||
-            sender.getSchema() != info.schema ||
-            !equalMediaTuple(sender.getMediaTuple(), info)) {
+    auto match_target = [info, replay_mode, replay_session_stream](const MediaSource &registered_src) {
+        if (registered_src.getSchema() != info.schema) {
+            return false;
+        }
+        if (replay_mode) {
+            return registered_src.getMediaTuple().stream == replay_session_stream;
+        }
+        return equalMediaTuple(registered_src.getMediaTuple(), info);
+    };
+
+    auto resolve_target_after_register = [info, replay_mode, replay_session_stream, find_target]() -> MediaSource::Ptr {
+        if (replay_mode) {
+            DebugL << "replay: 媒体注册完成,回复播放器:" << replay_session_stream;
+        } else {
+            // 播发器请求的流终于注册上了，切换到自己的线程再回复  [AUTO-TRANSLATED:7b79ad9b]
+            // The stream requested by the player is finally registered, switch to its own thread and reply
+            DebugL << "收到媒体注册事件,回复播放器:" << info.getUrl();
+            // 再找一遍媒体源，一般能找到  [AUTO-TRANSLATED:069de7f6]
+            // Find the media source again, usually it can be found
+        }
+        return find_target();
+    };
+
+    auto on_register = [weak_session, cb_once, cancel_all, poller, match_target, resolve_target_after_register](BroadcastMediaChangedArgs) {
+        if (!bRegist || !match_target(sender)) {
             // 不是自己感兴趣的事件，忽略之  [AUTO-TRANSLATED:b4e102d4]
             // Not an event of interest, ignore it
             return;
         }
 
-        poller->async([weak_session, cancel_all, info, cb_once]() {
+        poller->async([weak_session, cancel_all, cb_once, resolve_target_after_register]() {
             cancel_all();
-            if (auto strong_session = weak_session.lock()) {
-                // 播发器请求的流终于注册上了，切换到自己的线程再回复  [AUTO-TRANSLATED:7b79ad9b]
-                // The stream requested by the player is finally registered, switch to its own thread and reply
-                DebugL << "收到媒体注册事件,回复播放器:" << info.getUrl();
-                // 再找一遍媒体源，一般能找到  [AUTO-TRANSLATED:069de7f6]
-                // Find the media source again, usually it can be found
-                findAsync_l(info, strong_session, false, cb_once);
+            if (weak_session.lock()) {
+                cb_once(resolve_target_after_register());
             }
         }, false);
     };
@@ -446,6 +482,17 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
     // 监听媒体注册事件  [AUTO-TRANSLATED:9cf13779]
     // Listen for media registration events
     NoticeCenter::Instance().addListener(listener_tag, Broadcast::kBroadcastMediaChanged, on_register);
+
+    if (replay_mode) {
+        // replay 预备源的超时清理由工厂自带的延时任务负责，故这里不再装配 player 侧
+        // NotFoundStream 兑底；仅关闭首次 find() 与 listener 注册之间的竞态窗口。
+        // Close the gap between first find() and listener registration.
+        if (auto ready_src = find_target()) {
+            cancel_all();
+            cb_once(ready_src);
+        }
+        return;
+    }
 
     function<void()> close_player = [cb_once, cancel_all, poller]() {
         poller->async([cancel_all, cb_once]() {
@@ -457,7 +504,43 @@ static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &s
     };
     // 广播未找到流,此时可以立即去拉流，这样还来得及  [AUTO-TRANSLATED:794014f1]
     // Broadcast that the stream is not found, at this time you can immediately pull the stream, so it is still in time
-    NOTICE_EMIT(BroadcastNotFoundStreamArgs, Broadcast::kBroadcastNotFoundStream, info, *session, close_player);
+    NOTICE_EMIT(BroadcastNotFoundStreamArgs, Broadcast::kBroadcastNotFoundStream, info, *strong_session, close_player);
+    }; // run_find
+
+#ifdef ENABLE_MP4
+    // replay: stream id 命中 replay 规则时创建独立会话; 放到 WorkThreadPool 执行，避免阻塞请求方 poller
+    // 上挂载的其它连接；完成后切回原 poller，保持 NoticeCenter/Session 线程模型一致。
+    if (retry && RtspReplaySourceFactory::validateStreamKey(info.stream)) {
+        auto poller = session->getPoller();
+        auto schema = info.schema;
+        auto vhost = info.vhost;
+        auto stream = info.stream;
+        WorkThreadPool::Instance().getExecutor()->async([weak_session, poller, schema, vhost, stream, run_find, cb]() {
+            if (!weak_session.lock()) {
+                return;
+            }
+            string replay_session_stream;
+            createReplaySession(schema, vhost, stream, replay_session_stream);
+            poller->async([weak_session, run_find, replay_session_stream, cb]() {
+                if (!weak_session.lock()) {
+                    // 请求方已断开；已创建的预备 replay 源由工厂自带的延时任务回收
+                    return;
+                }
+
+                // Replay lookup miss should fail fast and must not fall back to live-stream
+                // not-found/auto-pull pipeline.
+                if (replay_session_stream.empty()) {
+                    cb(nullptr);
+                    return;
+                }
+                run_find(true, replay_session_stream);
+            });
+        });
+        return;
+    }
+#endif
+
+    run_find(false, "");
 }
 
 void MediaSource::findAsync(const MediaInfo &info, const std::shared_ptr<Session> &session, const function<void (const Ptr &)> &cb) {
@@ -662,9 +745,9 @@ void MediaSourceEvent::onReaderChanged(MediaSource &sender, int size){
     // No one is watching this video source, indicating that the source can be closed.
     GET_CONFIG(string, record_app, Record::kAppName);
     GET_CONFIG(int, stream_none_reader_delay, General::kStreamNoneReaderDelayMS);
-    // 如果mp4点播, 无人观看时我们强制关闭点播  [AUTO-TRANSLATED:9576e4b0]
-    // If it's an mp4 on-demand, we force close the on-demand when no one is watching.
-    bool is_mp4_vod = sender.getMediaTuple().app == record_app;
+    // 如果是点播场景(录制点播或replay), 无人观看时我们强制关闭点播。
+    GET_CONFIG(string, replay_app, Rtsp::kReplayAppName);
+    bool is_vod = sender.getMediaTuple().app == record_app || sender.getMediaTuple().app == replay_app;
     weak_ptr<MediaSource> weak_sender = sender.shared_from_this();
 
     EventPoller::Ptr specified_poller;
@@ -675,7 +758,7 @@ void MediaSourceEvent::onReaderChanged(MediaSource &sender, int size){
         // 尝试获取 OwnerPoller，没有实现则使用默认 nullptr
         // WarnL << ex.what();
     }
-    _async_close_timer = std::make_shared<Timer>(stream_none_reader_delay / 1000.0f, [weak_sender, is_mp4_vod]() {
+    _async_close_timer = std::make_shared<Timer>(stream_none_reader_delay / 1000.0f, [weak_sender, is_vod]() {
         auto strong_sender = weak_sender.lock();
         if (!strong_sender) {
             // 对象已经销毁  [AUTO-TRANSLATED:130328af]
@@ -689,7 +772,7 @@ void MediaSourceEvent::onReaderChanged(MediaSource &sender, int size){
             return false;
         }
 
-        if (!is_mp4_vod) {
+        if (!is_vod) {
             // 直播时触发无人观看事件，让开发者自行选择是否关闭  [AUTO-TRANSLATED:c6c75eaa]
             // When live streaming, trigger the no-viewer event, allowing developers to choose whether to close it.
             NOTICE_EMIT(BroadcastStreamNoneReaderArgs, Broadcast::kBroadcastStreamNoneReader, *strong_sender);
@@ -703,7 +786,7 @@ void MediaSourceEvent::onReaderChanged(MediaSource &sender, int size){
         } else {
             // 这个是mp4点播，我们自动关闭  [AUTO-TRANSLATED:8a7b9a90]
             // This is an mp4 on-demand, we automatically close it.
-            WarnL << "MP4点播无人观看,自动关闭:" << strong_sender->getUrl();
+            WarnL << "点播无人观看,自动关闭:" << strong_sender->getUrl();
             strong_sender->getOwnerPoller()->async([strong_sender]() { strong_sender->close(false); });
         }
         return false;

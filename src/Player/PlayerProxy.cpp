@@ -348,6 +348,10 @@ void PlayerProxy::onPlaySuccess() {
 
     auto audioTrack = getTrack(TrackAudio, false);
     if (audioTrack) {
+        if (!isG711Codec(audioTrack->getCodecId())) {
+            WarnL << "-----pull stream audio codec is non-G711 on connect/reconnect, url=" << _pull_url
+                  << ", codec=" << audioTrack->getCodecName();
+        }
         // 添加音频  [AUTO-TRANSLATED:e08e79ce]
         // Add audio
         _muxer->addTrack(audioTrack);

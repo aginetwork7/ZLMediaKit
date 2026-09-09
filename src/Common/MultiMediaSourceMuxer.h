@@ -85,6 +85,19 @@ public:
      */
     void setTimeStamp(uint32_t stamp);
 
+    // Set absolute time base (Unix ms) used by RTSP RTP extension timestamps.
+    void setRtpExtTimeBaseMS(uint64_t base_ms);
+
+    /**
+     * 重置平滑发送缓存并重同步时间轴
+     */
+    void resetPacedSender(uint32_t stamp);
+
+    /**
+     * 设置平滑发送的播放速率，用于回放变速
+     */
+    void setSpeed(float speed);
+
     /**
      * 重置track
      * Reset track

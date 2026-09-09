@@ -142,6 +142,9 @@ private:
     void createUdpSockIfNecessary(int track_idx);
 
 private:
+    mutable bool _warned_unknown_pt = false;
+    mutable bool _warned_unknown_interleaved = false;
+
     // 是否为性能测试模式  [AUTO-TRANSLATED:1fde8234]
     // Whether it is performance test mode
     bool _benchmark_mode = false;

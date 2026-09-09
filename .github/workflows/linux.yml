@@ -120,8 +120,14 @@ jobs:
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
         script: |
-          github.rest.issues.createComment({
-            issue_number: ${{vars.VERSION_ISSUE_NO}},
+          const issueNumber = Number('${{ vars.VERSION_ISSUE_NO }}');
+          if (!issueNumber) {
+            console.log('VERSION_ISSUE_NO is empty, skip issue comment.');
+            return;
+          }
+
+          await github.rest.issues.createComment({
+            issue_number: issueNumber,
             owner: context.repo.owner,
             repo: context.repo.repo,
             body: '- 下载地址: [${{ github.workflow }}_${{ env.BRANCH }}_${{ env.DATE }}](${{ steps.upload.outputs.artifact-url }})\n'

@@ -236,7 +236,12 @@ void MP4Recorder::resetTracks() {
 // Recursively scan for orphan temp mp4 files caused by power failure or abnormal exit and recover them
 static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped) {
     auto pDir = opendir(dir.c_str());
-    if (!pDir) return;
+    if (!pDir) {
+        // 目录不存在或不可读，记录一下，避免恢复逻辑静默失效
+        // Directory missing or unreadable, log it so the recovery never fails silently
+        DebugL << "Skip orphan scan, cannot open dir: " << dir << ", error: " << strerror(errno);
+        return;
+    }
     while (auto entry = readdir(pDir)) {
         string name = entry->d_name;
         if (name == "." || name == "..") continue;
@@ -257,20 +262,18 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
             continue;
         }
 
-        auto base = name.substr(1, name.size() - kRecordFileSuffixLen - 1); // 去掉前导 '.' 和末尾 '.mp4'
-        if (base.size() < kRecordTimeStrLen) {
+        // 临时文件名解析复用 RecordFileName.h 中的单一定义，避免与 producer(createFile)/
+        // consumer(replay catalog) 的命名规则漂移；名字不符合规则的隐藏 mp4 仍然按既有策略删除。
+        // The temp-name parsing reuses the single definition in RecordFileName.h so it cannot drift
+        // from the producer (createFile) or the consumer (replay catalog); a hidden mp4 that does
+        // not match the scheme is still deleted, as before.
+        time_t start_time = 0;
+        string index_str;
+        if (!parseTempRecordFileName(name, start_time, &index_str)) {
             WarnL << "Orphan file has unexpected name format, deleting: " << path;
             File::delete_file(path);
             continue;
         }
-        struct tm start_tm = {};
-        if (!strptime(base.substr(0, kRecordTimeStrLen).c_str(), kRecordTimeFormat, &start_tm)) {
-            WarnL << "Failed to parse start time from orphan file, deleting: " << path;
-            File::delete_file(path);
-            continue;
-        }
-        auto last_dash = base.rfind('-');
-        string index_str = (last_dash != string::npos && last_dash >= kRecordTimeStrLen) ? base.substr(last_dash + 1) : "0";
 
         try {
             MP4Demuxer demuxer;
@@ -278,7 +281,6 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
             auto duration_ms = demuxer.getDurationMS();
             demuxer.closeMP4();
 
-            time_t start_time = timegm(&start_tm);
             time_t duration_sec = (time_t)(duration_ms / 1000);
             if (duration_sec < 1) {
                 duration_sec = 1;
@@ -297,7 +299,12 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
                 InfoL << "Recovered orphan recording: " << path << " -> " << new_path;
                 ++recovered;
             } else {
-                WarnL << "Failed to rename orphan recording: " << path << " -> " << new_path;
+                // 带上 errno，并计入 skipped：否则权限/文件系统故障会让启动汇总少报受影响文件
+                // Carry errno and count it as skipped, otherwise permission / filesystem failures are
+                // under-reported by the startup summary
+                WarnL << "Failed to rename orphan recording: " << path << " -> " << new_path
+                      << ", err=" << strerror(errno);
+                ++skipped;
             }
         } catch (std::exception &ex) {
             // 不删除：可能是权限问题或临时 IO 错误，下次启动可重试
@@ -311,15 +318,51 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
 void MP4Recorder::recoverOrphanRecordings() {
     GET_CONFIG(string, recordPath, Protocol::kMP4SavePath);
     GET_CONFIG(string, recordAppName, Record::kAppName);
+    GET_CONFIG(bool, enableVhost, General::kEnableVhost);
     if (recordPath.empty()) {
         return;
     }
 
     auto absPath = File::absolutePath("", recordPath);
-    auto filePath = recordAppName + "/";
-    auto recoverRoot = File::absolutePath(filePath, absPath);
+    if (absPath.empty()) {
+        return;
+    }
+    if (absPath.back() != '/') {
+        absPath.push_back('/');
+    }
     int recovered = 0, skipped = 0;
-    recoverOrphansInDir(recoverRoot, recovered, skipped);
+
+    // 恢复起点必须与 Recorder::getRecordPath 的目录布局保持一致：
+    // Recovery roots must match the directory layout used by Recorder::getRecordPath:
+    //   enableVhost=1: <recordPath>/<vhost>/<recordApp>/<app>/<stream>/<date>/
+    //   enableVhost=0: <recordPath>/<recordApp>/<app>/<stream>/<date>/
+    if (enableVhost) {
+        // 遍历一级 vhost 目录，逐个扫描其下的 <recordApp> 子树
+        // Iterate the first-level vhost dirs and scan the <recordApp> subtree under each
+        auto pDir = opendir(absPath.c_str());
+        if (!pDir) {
+            DebugL << "Skip orphan scan, cannot open record root: " << absPath << ", error: " << strerror(errno);
+            return;
+        }
+        while (auto entry = readdir(pDir)) {
+            string name = entry->d_name;
+            if (name == "." || name == "..") {
+                continue;
+            }
+            auto vhost_dir = absPath + name + "/";
+            struct stat lst;
+            // 用 lstat 跳过符号链接，避免跟随链接跑到录像目录之外
+            // Use lstat to skip symlinks so we never follow one outside the record dir
+            if (lstat(vhost_dir.c_str(), &lst) != 0 || S_ISLNK(lst.st_mode) || !S_ISDIR(lst.st_mode)) {
+                continue;
+            }
+            recoverOrphansInDir(File::absolutePath(recordAppName + "/", vhost_dir), recovered, skipped);
+        }
+        closedir(pDir);
+    } else {
+        recoverOrphansInDir(File::absolutePath(recordAppName + "/", absPath), recovered, skipped);
+    }
+
     if (recovered > 0 || skipped > 0) {
         InfoL << "Orphan recording recovery complete: recovered=" << recovered << ", skipped=" << skipped;
     }

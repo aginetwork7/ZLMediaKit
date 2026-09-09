@@ -8,7 +8,6 @@
  * may be found in the AUTHORS file in the root of the source tree.
  */
 
-#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <sys/stat.h>
@@ -67,7 +66,8 @@ static bool loadRtspAuthFile(const string &path, string &username, string &passw
     time_t mtime = 0;
     off_t size = -1;
     if (!getFileStat(path, mtime, size)) {
-        ErrorL << "rtsp authFile stat failed: " << path;
+        auto err = errno;
+        ErrorL << "rtsp authFile stat failed: " << path << ", errno=" << err << "(" << strerror(err) << ")";
         return false;
     }
 
@@ -79,7 +79,8 @@ static bool loadRtspAuthFile(const string &path, string &username, string &passw
 
     ifstream ifs(path);
     if (!ifs.is_open()) {
-        ErrorL << "rtsp authFile open failed: " << path;
+        auto err = errno;
+        ErrorL << "rtsp authFile open failed: " << path << ", errno=" << err << "(" << strerror(err) << ")";
         return false;
     }
 
@@ -550,11 +551,20 @@ void RtspSession::handleReq_Describe(const Parser &parser) {
         });
     };
 
-    if(_rtsp_realm.empty()){
+    if (_rtsp_realm.empty()) {
+        GET_CONFIG(string, auth_file, Rtsp::kAuthFile);
+        if (auth_file.empty()) {
+            // 未配置 authFile 时，realm 由 kBroadcastOnGetRtspRealm 决定；无监听者则回落 invoker("")，
+            // 交给上面统一的空 realm 处理逻辑。
+            if (!NOTICE_EMIT(BroadcastOnGetRtspRealmArgs, Broadcast::kBroadcastOnGetRtspRealm, _media_info, invoker, *this)) {
+                invoker("");
+            }
+            return;
+        }
         GET_CONFIG(string, auth_realm, Rtsp::kAuthRealm);
         //realm配置为空时使用默认值
         invoker(auth_realm.empty() ? "tinynvr" : auth_realm);
-    }else{
+    } else {
         invoker(_rtsp_realm);
     }
 }
@@ -687,13 +697,13 @@ void RtspSession::onAuthDigest(const string &realm,const string &auth_md5){
     }
     //check realm
     if(realm != map["realm"]){
-        onAuthFailed(realm,StrPrinter << "realm not mached:" << realm << " != " << map["realm"]);
+        onAuthFailed(realm,StrPrinter << "realm not matched:" << realm << " != " << map["realm"]);
         return ;
     }
     //check nonce
     auto nonce = map["nonce"];
     if(_auth_nonce != nonce){
-        onAuthFailed(realm,StrPrinter << "nonce not mached:" << nonce << " != " << _auth_nonce);
+        onAuthFailed(realm,StrPrinter << "nonce not matched:" << nonce << " != " << _auth_nonce);
         return ;
     }
     //check username and uri
@@ -798,19 +808,19 @@ void RtspSession::onAuthSha256(const string &realm, const string &auth_sha256, c
     }
     // check realm
     if (realm != map["realm"]) {
-        onAuthFailed(realm, StrPrinter << "realm not mached:" << realm << " != " << map["realm"]);
+        onAuthFailed(realm, StrPrinter << "realm not matched:" << realm << " != " << map["realm"]);
         return;
     }
     // check nonce
     auto nonce = map["nonce"];
     if (_auth_nonce != nonce) {
-        onAuthFailed(realm, StrPrinter << "nonce not mached:" << nonce << " != " << _auth_nonce);
+        onAuthFailed(realm, StrPrinter << "nonce not matched:" << nonce << " != " << _auth_nonce);
         return;
     }
     // check opaque
     auto opaque = map["opaque"];
     if (!_auth_opaque.empty() && _auth_opaque != opaque) {
-        onAuthFailed(realm, StrPrinter << "opaque not mached:" << opaque << " != " << _auth_opaque);
+        onAuthFailed(realm, StrPrinter << "opaque not matched:" << opaque << " != " << _auth_opaque);
         return;
     }
     // check username and uri
@@ -931,13 +941,15 @@ void RtspSession::onAuthUser(const string &realm,const string &authorization){
                 onAuthFailed(realm, StrPrinter << "unsupported digest algorithm:" << algorithm << ", strict SHA-256 required");
             }
         } else {
-            //非严格模式：优先SHA-256，客户端不支持时fallback到MD5
-            if (strcasecmp(algorithm.data(), "SHA-256") == 0 && response.size() == 64) {
+            // 非严格模式：仅当客户端明确声明 SHA-256 且响应长度匹配时走 SHA-256，
+            // 其余情况(未声明/MD5/未知算法)统一回退 MD5 路径。
+            // Non-strict mode: take the SHA-256 path only when the client explicitly announces
+            // SHA-256 with a matching response length; everything else (absent / MD5 / unknown
+            // algorithm) falls back to the MD5 path.
+            const bool client_wants_sha256 = strcasecmp(algorithm.data(), "SHA-256") == 0 && response.size() == 64;
+            if (client_wants_sha256) {
                 onAuthSha256(realm, authStr, "DESCRIBE");
-            } else if (algorithm.empty() || strcasecmp(algorithm.data(), "MD5") == 0 || response.size() == 32) {
-                onAuthDigest(realm, authStr);
             } else {
-                //未知算法默认按md5尝试
                 onAuthDigest(realm, authStr);
             }
         }

@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7
 FROM ubuntu:24.04 AS build
 ARG MODEL=Release
 #rtsp,http,https

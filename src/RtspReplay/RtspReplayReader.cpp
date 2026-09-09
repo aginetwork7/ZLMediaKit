@@ -424,7 +424,14 @@ uint32_t RtspReplayReader::getCurrentOffset() const {
     // the first segment start and can span many days (tens of millions of ms), well beyond
     // float's ~16.7M precise integer range, which would otherwise corrupt progress/seek.
     auto advanced = _paused ? 0.0 : (double)_speed * _seek_ticker.elapsedTime();
-    return (uint32_t)((double)_seek_to + advanced);
+    auto offset = (double)_seek_to + advanced;
+    // 收窄到 uint32_t 前必须 clamp：否则超出 UINT32_MAX 会回绕成更小的 offset，表现为进度倒退
+    // Clamp before narrowing to uint32_t: past UINT32_MAX the cast wraps into a smaller offset,
+    // which shows up as the playhead jumping backwards
+    if (offset >= (double)std::numeric_limits<uint32_t>::max()) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    return (uint32_t)offset;
 }
 
 void RtspReplayReader::setCurrentOffset(uint32_t offset_ms, bool sync_timeline) {

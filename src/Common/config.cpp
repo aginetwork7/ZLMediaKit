@@ -261,13 +261,16 @@ static onceToken token([]() {
     mINI::Instance()[kAuthStrictSha256] = 0;
     mINI::Instance()[kAuthFile] = "";
     mINI::Instance()[kAuthRealm] = "tinynvr";
+    mINI::Instance()[kAuthStrictSha256] = 0;
+    mINI::Instance()[kAuthFile] = "";
+    mINI::Instance()[kAuthRealm] = "tinynvr";
     mINI::Instance()[kHandshakeSecond] = 15;
     mINI::Instance()[kKeepAliveSecond] = 15;
     mINI::Instance()[kDirectProxy] = 1;
     mINI::Instance()[kLowLatency] = 0;
     mINI::Instance()[kRtpTransportType] = -1;
-    mINI::Instance()[kMaxSessionCount] = 128;
-    mINI::Instance()[kMaxReplaySessionCount] = 32;
+    mINI::Instance()[kMaxSessionCount] = 0;
+    mINI::Instance()[kMaxReplaySessionCount] = 0;
     mINI::Instance()[kReplayAppName] = "replay";
 });
 } // namespace Rtsp

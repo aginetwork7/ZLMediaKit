@@ -286,3 +286,4 @@ int main(int argc, char *argv[]) {
     players.clear();
     return benchmark_context->stats.failed.load() == 0 && succeeded == static_cast<size_t>(player_count) ? 0 : 1;
 }
+

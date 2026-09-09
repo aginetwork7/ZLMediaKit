@@ -262,20 +262,18 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
             continue;
         }
 
-        auto base = name.substr(1, name.size() - kRecordFileSuffixLen - 1); // 去掉前导 '.' 和末尾 '.mp4'
-        if (base.size() < kRecordTimeStrLen) {
+        // 临时文件名解析复用 RecordFileName.h 中的单一定义，避免与 producer(createFile)/
+        // consumer(replay catalog) 的命名规则漂移；名字不符合规则的隐藏 mp4 仍然按既有策略删除。
+        // The temp-name parsing reuses the single definition in RecordFileName.h so it cannot drift
+        // from the producer (createFile) or the consumer (replay catalog); a hidden mp4 that does
+        // not match the scheme is still deleted, as before.
+        time_t start_time = 0;
+        string index_str;
+        if (!parseTempRecordFileName(name, start_time, &index_str)) {
             WarnL << "Orphan file has unexpected name format, deleting: " << path;
             File::delete_file(path);
             continue;
         }
-        struct tm start_tm = {};
-        if (!strptime(base.substr(0, kRecordTimeStrLen).c_str(), kRecordTimeFormat, &start_tm)) {
-            WarnL << "Failed to parse start time from orphan file, deleting: " << path;
-            File::delete_file(path);
-            continue;
-        }
-        auto last_dash = base.rfind('-');
-        string index_str = (last_dash != string::npos && last_dash >= kRecordTimeStrLen) ? base.substr(last_dash + 1) : "0";
 
         try {
             MP4Demuxer demuxer;
@@ -283,7 +281,6 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
             auto duration_ms = demuxer.getDurationMS();
             demuxer.closeMP4();
 
-            time_t start_time = timegm(&start_tm);
             time_t duration_sec = (time_t)(duration_ms / 1000);
             if (duration_sec < 1) {
                 duration_sec = 1;
@@ -302,7 +299,12 @@ static void recoverOrphansInDir(const string &dir, int &recovered, int &skipped)
                 InfoL << "Recovered orphan recording: " << path << " -> " << new_path;
                 ++recovered;
             } else {
-                WarnL << "Failed to rename orphan recording: " << path << " -> " << new_path;
+                // 带上 errno，并计入 skipped：否则权限/文件系统故障会让启动汇总少报受影响文件
+                // Carry errno and count it as skipped, otherwise permission / filesystem failures are
+                // under-reported by the startup summary
+                WarnL << "Failed to rename orphan recording: " << path << " -> " << new_path
+                      << ", err=" << strerror(errno);
+                ++skipped;
             }
         } catch (std::exception &ex) {
             // 不删除：可能是权限问题或临时 IO 错误，下次启动可重试

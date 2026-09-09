@@ -44,11 +44,20 @@ RtspReplayRequest RtspReplayCatalog::parseRequest(const string &schema, const st
         throw invalid_argument("invalid replay stream id");
     }
 
-    if (parts[0].empty() || parts[1].empty()) {
+    // device/channel/stream_type 会被拼进录像目录路径。File::absolutePath() 默认不允许越过根目录，
+    // 这里仍显式拒绝 '.'/'..' 等可疑段做纵深防御，避免将来换成别的拼接方式时失守。
+    // device/channel/stream_type end up inside a filesystem path. File::absolutePath() already refuses
+    // to escape its root; suspicious segments are still rejected explicitly as defence in depth so a
+    // future change of the path assembly cannot silently lose that guarantee.
+    auto is_safe_segment = [](const string &value) {
+        return !value.empty() && value != "." && value.find("..") == string::npos &&
+               value.find('/') == string::npos && value.find('\\') == string::npos;
+    };
+    if (!is_safe_segment(parts[0]) || !is_safe_segment(parts[1])) {
         throw invalid_argument("invalid replay device/channel");
     }
 
-    if (parts[2].empty() || parts[2][0] != 's') {
+    if (parts[2].empty() || parts[2][0] != 's' || !is_safe_segment(parts[2])) {
         throw invalid_argument("invalid replay stream type");
     }
 
@@ -58,9 +67,19 @@ RtspReplayRequest RtspReplayCatalog::parseRequest(const string &schema, const st
 
     uint64_t begin_ms = 0;
     uint64_t end_ms = 0;
+    auto begin_token = parts[3].substr(1);
+    auto end_token = parts[4].substr(1);
     try {
-        begin_ms = stoull(parts[3].substr(1));
-        end_ms = stoull(parts[4].substr(1));
+        size_t begin_pos = 0;
+        size_t end_pos = 0;
+        begin_ms = stoull(begin_token, &begin_pos);
+        end_ms = stoull(end_token, &end_pos);
+        // 必须整串消费，否则 "b123abc" 之类会被静默截断成另一个时间窗
+        // The whole token must be consumed, otherwise "b123abc" is silently reinterpreted as a
+        // different time window instead of being rejected
+        if (begin_pos != begin_token.size() || end_pos != end_token.size()) {
+            throw invalid_argument("invalid replay timestamp");
+        }
     } catch (...) {
         throw invalid_argument("invalid replay timestamp");
     }
@@ -117,6 +136,10 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
 
     auto pDir = opendir(recordDir.c_str());
     if (!pDir) {
+        // 与「确实没有录像」区分开：权限/挂载/路径错误必须能从日志看出来
+        // Keep this distinguishable from a legitimate "no recordings" result: permission, mount or
+        // path errors must be visible in the log
+        WarnL << "replay: cannot open record dir: " << recordDir << ", err=" << strerror(errno);
         return ret;
     }
 

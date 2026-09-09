@@ -17,6 +17,11 @@
 
 namespace mediakit {
 
+// URL 解析后的规范化 replay 请求。
+// _window_begin_at_ms / _window_end_at_ms 为 epoch 毫秒，构成半开区间 [begin, end)。
+// Canonical replay request after url parsing.
+// _window_begin_at_ms / _window_end_at_ms are epoch milliseconds forming the half-open interval
+// [begin, end).
 struct RtspReplayRequest {
     std::string _schema;
     std::string _vhost;
@@ -27,6 +32,11 @@ struct RtspReplayRequest {
     uint64_t _window_end_at_ms = 0;
 };
 
+// 与请求窗口相交的单个录像分片。
+// _begin_at_ms / _end_at_ms 为 epoch 毫秒，半开区间 [begin, end)；_duration_ms == end - begin。
+// One recording segment intersecting the requested window.
+// _begin_at_ms / _end_at_ms are epoch milliseconds forming the half-open interval [begin, end);
+// _duration_ms == _end_at_ms - _begin_at_ms.
 struct RtspReplaySegment {
     std::string _file_path;
     uint64_t _begin_at_ms = 0;
@@ -34,6 +44,10 @@ struct RtspReplaySegment {
     uint64_t _duration_ms = 0;
 };
 
+// RtspReplayReader 消费的分片目录；_segments 按 _begin_at_ms 升序且互不重叠(允许有空洞)。
+// 窗口字段回显请求窗口，单位同上。
+// The segment catalog consumed by RtspReplayReader; _segments is sorted by _begin_at_ms and
+// non-overlapping (gaps are allowed). The window fields echo the request window, same unit.
 struct RtspReplayCatalogResult {
     std::vector<RtspReplaySegment> _segments;
     uint64_t _window_begin_at_ms = 0;

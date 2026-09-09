@@ -34,8 +34,17 @@ public:
 
     RtspReplayReader(const MediaTuple &tuple, const RtspReplayCatalogResult &catalog, const ProtocolOption &option, toolkit::EventPoller::Ptr poller = nullptr);
 
+    // 启动送流定时器并预热轨道；失败返回 false(此时未持有定时器，可直接释放)。
+    // 定时器已在跑时重复调用是幂等的。
+    // Start the pumping timer and prime the tracks; returns false on failure (the reader then holds no
+    // timer and can be released as is). Repeated calls are idempotent while the timer is active.
     bool start();
+    // 停止送流定时器并断开定时器对自身的强引用，使 reader 可被释放；可重复调用。
+    // Stop the pumping timer and drop the timer's strong self-reference so the reader can be released.
+    // Safe to call more than once.
     void stop();
+    // 返回 setup()/start() 阶段采集的耗时统计；start() 之前各字段为 0。
+    // Timing stats collected during setup()/start(); all fields are 0 before start().
     const PerfStats &getPerfStats() const;
 
 private:

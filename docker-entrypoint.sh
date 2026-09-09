@@ -2,6 +2,7 @@
 set -eu
 
 : "${MEDIA_SERVICE_HOOK_BASE_URL:?MEDIA_SERVICE_HOOK_BASE_URL is required}"
+: "${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}"
 
 media_config_type=${MEDIA_CONFIG_TYPE:-media}
 case "$media_config_type" in
@@ -24,6 +25,7 @@ exec /opt/media/bin/MediaServer \
   -s /opt/media/bin/default.pem \
   -c "$config_file" \
   --hook-base-url "$HOOK_BASE_URL" \
+  --secret "$MEDIA_SERVER_SECRET" \
   --log-dir /opt/media/bin/log \
   -l 0 \
   "$@"

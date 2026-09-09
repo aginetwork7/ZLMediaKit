@@ -181,6 +181,14 @@ public:
                              "覆盖配置中的mediaServerId",/*该选项说明文字*/
                              nullptr);
 
+        (*_parser) << Option(0,/*该选项简称，如果是\x00则说明无简称*/
+                     "secret",/*该选项全称,每个选项必须有全称；不得为null或空字符串*/
+                     Option::ArgRequired,/*该选项后面必须跟值*/
+                     nullptr,/*该选项默认值*/
+                     false,/*该选项是否必须赋值，如果没有默认值且为ArgRequired时用户必须提供该参数否则将抛异常*/
+                     "覆盖配置中的api.secret",/*该选项说明文字*/
+                     nullptr);
+
         (*_parser) << Option('s',/*该选项简称，如果是\x00则说明无简称*/
                              "ssl",/*该选项全称,每个选项必须有全称；不得为null或空字符串*/
                              Option::ArgRequired,/*该选项后面必须跟值*/
@@ -285,6 +293,7 @@ int start_main(int argc,char *argv[]) {
         g_ini_file = cmd_main["config"];
         string hook_base_url = cmd_main.hasKey("hook-base-url") ? cmd_main["hook-base-url"] : "";
         string media_server_id = cmd_main.hasKey("media-server-id") ? cmd_main["media-server-id"] : "";
+        string api_secret = cmd_main.hasKey("secret") ? cmd_main["secret"] : "";
         string ssl_file = cmd_main["ssl"];
         int threads = cmd_main["threads"];
         bool affinity = cmd_main["affinity"];
@@ -341,6 +350,9 @@ int start_main(int argc,char *argv[]) {
         }
 
         auto &secret = mINI::Instance()[API::kSecret];
+        if (!api_secret.empty()) {
+            secret = std::move(api_secret);
+        }
         if (secret == "035c73f7-bb6b-4889-a715-d9eb2d1925cc" || secret.empty()) {
             // 使用默认secret被禁止启动  [AUTO-TRANSLATED:6295164b]
             // Starting with the default secret is prohibited

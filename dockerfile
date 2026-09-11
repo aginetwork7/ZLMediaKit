@@ -1,12 +1,7 @@
 # syntax=docker/dockerfile:1.7
 FROM ubuntu:24.04 AS build
 ARG MODEL=Release
-#rtsp,http,https,rtc
-EXPOSE 554/tcp
-EXPOSE 8089/tcp
-EXPOSE 8449/tcp
-EXPOSE 8000/tcp
-EXPOSE 8000/udp
+
 # ADD sources.list /etc/apt/sources.list
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \

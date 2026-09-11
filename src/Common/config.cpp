@@ -261,9 +261,6 @@ static onceToken token([]() {
     mINI::Instance()[kAuthStrictSha256] = 0;
     mINI::Instance()[kAuthFile] = "";
     mINI::Instance()[kAuthRealm] = "tinynvr";
-    mINI::Instance()[kAuthStrictSha256] = 0;
-    mINI::Instance()[kAuthFile] = "";
-    mINI::Instance()[kAuthRealm] = "tinynvr";
     mINI::Instance()[kHandshakeSecond] = 15;
     mINI::Instance()[kKeepAliveSecond] = 15;
     mINI::Instance()[kDirectProxy] = 1;

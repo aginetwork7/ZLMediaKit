@@ -2265,14 +2265,12 @@ void installWebApi() {
     api_regist("/index/api/whipBatch", [](API_ARGS_STRING_ASYNC) { whip_whep_func("push_batch", "whip_batch", API_ARGS_VALUE, invoker); });
 
     api_regist("/index/api/whipBatchInfo", [](API_ARGS_MAP) {
-        CHECK_SECRET();
         CHECK_ARGS("app", "stream");
 
         val["data"] = BatchPublishSessionManager::Instance().getSessionInfo(allArgs["app"], allArgs["stream"]);
     });
 
     api_regist("/index/api/getWhepViewerCount", [](API_ARGS_MAP) {
-        CHECK_SECRET();
         CHECK_ARGS("app", "stream");
 
         Json::Value data;
@@ -2284,7 +2282,6 @@ void installWebApi() {
     });
 
     api_regist("/index/api/getWebRtcConnectionList", [](API_ARGS_MAP) {
-        CHECK_SECRET();
         auto offset = std::max(0, atoi(allArgs["offset"].data()));
         auto limit = atoi(allArgs["limit"].data());
         limit = limit > 0 ? std::min(limit, 200) : 100;

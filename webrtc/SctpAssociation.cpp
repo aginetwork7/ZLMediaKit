@@ -554,10 +554,18 @@ namespace RTC
     void SctpAssociation::OnUsrSctpReceiveSctpData(
       uint16_t streamId, uint16_t ssn, uint32_t ppid, int flags, const uint8_t* data, size_t len)
     {
-        // Ignore WebRTC DataChannel Control DATA chunks.
+        // A Pion-created DataChannel sends DCEP OPEN with PPID 50. It does not
+        // transition to Open until the peer replies with the one-byte ACK.
         if (ppid == 50)
         {
-            MS_WARN_TAG(sctp, "ignoring SCTP data with ppid:50 (WebRTC DataChannel Control)");
+            constexpr uint8_t dataChannelOpen{ 0x03u };
+            constexpr uint8_t dataChannelAck{ 0x02u };
+            if (this->isDataChannel && len > 0 && data[0] == dataChannelOpen)
+            {
+                RTC::SctpStreamParameters params;
+                params.streamId = streamId;
+                this->SendSctpMessage(params, 50u, &dataChannelAck, sizeof(dataChannelAck));
+            }
 
             return;
         }

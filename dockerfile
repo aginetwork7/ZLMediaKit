@@ -1,10 +1,7 @@
 # syntax=docker/dockerfile:1.7
 FROM ubuntu:24.04 AS build
 ARG MODEL=Release
-#rtsp,http
-EXPOSE 554/tcp
-EXPOSE 8089/tcp
-EXPOSE 8449/tcp
+
 # ADD sources.list /etc/apt/sources.list
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -23,6 +20,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
          ca-certificates \
          tzdata \
          libssl-dev \
+		 libusrsctp-dev \
          gcc \
          g++ \
          gdb && \
@@ -49,7 +47,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         cmake -G Ninja \
             -DENABLE_PYTHON=false \
             -DCMAKE_BUILD_TYPE=${MODEL} \
-            -DENABLE_WEBRTC=false \
+            -DENABLE_WEBRTC=true \
             -DENABLE_FFMPEG=true \
             -DENABLE_TESTS=false \
             -DENABLE_API=false \
@@ -82,10 +80,16 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
 
 WORKDIR /opt/media/bin/
 COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/MediaServer /opt/media/ZLMediaKit/default.pem /opt/media/bin/
-COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/config.ini /opt/media/conf/
+COPY --from=build /usr/local/lib/libsrtp2.so.* /usr/local/lib/
+COPY --from=build /usr/lib/*/libusrsctp.so.* /usr/local/lib/
+COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/config.ini /opt/media/conf/config.ini
+COPY --from=build /opt/media/ZLMediaKit/conf/config.media.ini /opt/media/conf/config.media.ini
+COPY --from=build /opt/media/ZLMediaKit/conf/config.sfu.ini /opt/media/conf/config.sfu.ini
 COPY --from=build /opt/media/ZLMediaKit/www/ /opt/media/bin/www/
 COPY --from=build /opt/media/ZLMediaKit/tools/record_zlm_resources.sh /opt/media/bin/
-RUN chmod +x /opt/media/bin/record_zlm_resources.sh
+COPY docker-entrypoint.sh /opt/media/bin/docker-entrypoint.sh
+RUN ldconfig && \
+    chmod +x /opt/media/bin/record_zlm_resources.sh /opt/media/bin/docker-entrypoint.sh
 
 ENV PATH=/opt/media/bin:$PATH
-CMD ["./MediaServer","-s", "default.pem", "-c", "../conf/config.ini", "--log-dir", "/opt/media/bin/log", "-l","0"]
+ENTRYPOINT ["/opt/media/bin/docker-entrypoint.sh"]

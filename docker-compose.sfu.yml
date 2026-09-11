@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  zlmediakit:
+    image: ${REGISTRY}/zlmediakit:${ZLM_TAG}
+    container_name: zlmediakit
+    network_mode: host
+    environment:
+      MEDIA_CONFIG_TYPE: ${MEDIA_CONFIG_TYPE:-sfu}
+      MEDIA_SERVICE_HOOK_BASE_URL: ${MEDIA_SERVICE_HOOK_BASE_URL:?MEDIA_SERVICE_HOOK_BASE_URL is required}
+      MEDIA_SERVER_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}
+      MEDIA_SERVER_ID: ${MEDIA_SERVER_ID:-}
+      EXTERN_IP: ${EXTERN_IP:?EXTERN_IP is required}
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+    restart: unless-stopped

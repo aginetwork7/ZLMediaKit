@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   zlmediakit:
     image: ${REGISTRY}/zlmediakit:${ZLM_TAG}
@@ -11,8 +9,11 @@ services:
       MEDIA_SERVER_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}
       MEDIA_SERVER_ID: ${MEDIA_SERVER_ID:-}
       EXTERN_IP: ${EXTERN_IP:?EXTERN_IP is required}
+    volumes:
+      - ${PWD}/conf:/opt/media/conf
+      - ${PWD}/log:/opt/media/bin/log
     cap_add:
       - SYS_NICE
     ulimits:
       rtprio: 99
-    restart: unless-stopped
+    restart: always

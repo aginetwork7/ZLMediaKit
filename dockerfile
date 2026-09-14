@@ -85,7 +85,8 @@ COPY --from=build /usr/lib/*/libusrsctp.so.* /usr/local/lib/
 COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/config.ini /opt/media/conf/config.ini
 COPY --from=build /opt/media/ZLMediaKit/conf/config.media.ini /opt/media/conf/config.media.ini
 COPY --from=build /opt/media/ZLMediaKit/conf/config.sfu.ini /opt/media/conf/config.sfu.ini
-COPY --from=build /opt/media/ZLMediaKit/www/ /opt/media/bin/www/
+# 仅保留 webassist，避免 swagger/webrtc 等目录随 http 服务对外暴露
+COPY --from=build /opt/media/ZLMediaKit/www/webassist/ /opt/media/bin/www/webassist/
 COPY --from=build /opt/media/ZLMediaKit/tools/record_zlm_resources.sh /opt/media/bin/
 COPY docker-entrypoint.sh /opt/media/bin/docker-entrypoint.sh
 RUN ldconfig && \

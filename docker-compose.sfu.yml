@@ -10,7 +10,6 @@ services:
       MEDIA_SERVER_ID: ${MEDIA_SERVER_ID:-}
       EXTERN_IP: ${EXTERN_IP:?EXTERN_IP is required}
     volumes:
-      - ${PWD}/conf:/opt/media/conf
       - ${PWD}/log:/opt/media/bin/log
     cap_add:
       - SYS_NICE

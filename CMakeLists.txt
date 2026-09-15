@@ -602,7 +602,9 @@ endif ()
 # 拷贝www文件夹、配置文件、默认证书
 # Copy www folder, configuration file, default certificate
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/www" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/conf/config.ini" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
+foreach(CONFIG_FILE config.ini config.media.ini config.sfu.ini)
+  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/conf/${CONFIG_FILE}" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
+endforeach()
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/default.pem" DESTINATION ${EXECUTABLE_OUTPUT_PATH})
 
 if (ENABLE_FFMPEG)

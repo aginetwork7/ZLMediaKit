@@ -553,6 +553,7 @@ public:
 
     // 获取checklist信息，用于API查询
     Json::Value getChecklistInfo() const;
+    Json::Value getSelectedPairInfo() const;
     size_t getRecvSpeed();
     size_t getRecvTotalBytes();
     size_t getSendSpeed();

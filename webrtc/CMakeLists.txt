@@ -55,6 +55,11 @@ file(GLOB WEBRTC_SRC_LIST
   ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/*.h
   ${CMAKE_CURRENT_SOURCE_DIR}/*.hpp)
+file(GLOB WEBRTC_MULTI_SOURCE_SRC_LIST
+  ${CMAKE_CURRENT_SOURCE_DIR}/MultiSourceWebRtcPusher/*.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/MultiSourceWebRtcPusher/*.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/MultiSourceWebRtcPusher/*.hpp)
+list(APPEND WEBRTC_SRC_LIST ${WEBRTC_MULTI_SOURCE_SRC_LIST})
 add_library(webrtc STATIC ${WEBRTC_SRC_LIST})
 add_library(ZLMediaKit::WebRTC ALIAS webrtc)
 target_compile_definitions(webrtc

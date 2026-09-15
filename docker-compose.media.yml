@@ -5,6 +5,10 @@ services:
     image: ${REGISTRY}/zlmediakit:${ZLM_TAG}
     container_name: zlmediakit
     network_mode: host
+    environment:
+      MEDIA_CONFIG_TYPE: ${MEDIA_CONFIG_TYPE:-media}
+      MEDIA_SERVICE_HOOK_BASE_URL: ${MEDIA_SERVICE_HOOK_BASE_URL:?MEDIA_SERVICE_HOOK_BASE_URL is required}
+      MEDIA_SERVER_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}
     cap_add:
       - SYS_NICE
     ulimits:

@@ -351,14 +351,18 @@ public:
 template <typename Args>
 class WebRtcArgsImp : public mediakit::WebRtcArgs {
 public:
-    WebRtcArgsImp(const HttpAllArgs<Args> &args, std::string session_id)
+    WebRtcArgsImp(const HttpAllArgs<Args> &args, std::string session_id, std::string session_source = "")
         : _args(args)
-        , _session_id(std::move(session_id)) {}
+        , _session_id(std::move(session_id))
+        , _session_source(std::move(session_source)) {}
     ~WebRtcArgsImp() override = default;
 
     toolkit::variant operator[](const std::string &key) const override {
         if (key == "url") {
             return getUrl();
+        }
+        if (key == "session_source") {
+            return _session_source;
         }
         return _args[key];
     }
@@ -375,6 +379,7 @@ private:
 private:
     HttpAllArgs<Args> _args;
     std::string _session_id;
+    std::string _session_source;
 };
 #endif
 

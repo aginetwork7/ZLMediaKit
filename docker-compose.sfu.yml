@@ -5,7 +5,7 @@ services:
     network_mode: host
     environment:
       MEDIA_CONFIG_TYPE: ${MEDIA_CONFIG_TYPE:-sfu}
-      MEDIA_SERVICE_HOOK_BASE_URL: ${MEDIA_SERVICE_HOOK_BASE_URL:?MEDIA_SERVICE_HOOK_BASE_URL is required}
+      MEDIA_SERVICE_HOOK_BASE_URL: ${MEDIA_SERVICE_HOOK_BASE_URL:http://host.docker.internal:8080/agi7/api/media-control/hook}
       MEDIA_SERVER_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}
       MEDIA_SERVER_ID: ${MEDIA_SERVER_ID:-}
       EXTERN_IP: ${EXTERN_IP:?EXTERN_IP is required}

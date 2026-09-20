@@ -3,6 +3,8 @@ services:
     image: ${REGISTRY}/zlmediakit:${ZLM_TAG}
     container_name: zlmediakit
     network_mode: host
+    env_file:
+      - ${PWD}/.env
     environment:
       MEDIA_CONFIG_TYPE: ${MEDIA_CONFIG_TYPE:-sfu}
       MEDIA_SERVICE_HOOK_BASE_URL: ${MEDIA_SERVICE_HOOK_BASE_URL:-"http://host.docker.internal:8080/agi7/api/media-control/hook"}
@@ -16,3 +18,44 @@ services:
     ulimits:
       rtprio: 99
     restart: always
+
+  fluent-bit-zlm:
+    image: fluent/fluent-bit:5.1
+    container_name: fluent-bit-zlm
+    command:
+      - -c
+      - /fluent-bit/etc/fluent-bit.yaml
+      - -T
+      - >-
+        CREATE STREAM host.netif.1m WITH (tag='host.netif.1m') AS SELECT
+        SUM(eth0.rx.bytes) AS rx_bytes, SUM(eth0.tx.bytes) AS tx_bytes FROM
+        TAG:'host.netif' WINDOW TUMBLING (60 SECOND);
+      - -T
+      - >-
+        CREATE STREAM host.netif.3m WITH (tag='host.netif.3m') AS SELECT
+        SUM(eth0.rx.bytes) AS rx_bytes, SUM(eth0.tx.bytes) AS tx_bytes FROM
+        TAG:'host.netif' WINDOW TUMBLING (180 SECOND);
+    # depends_on:
+    #   - zlmediakit
+    env_file:
+      - ${PWD}/.env
+    environment:
+      MEDIA_SERVER_ID: ${MEDIA_SERVER_ID:?MEDIA_SERVER_ID is required}
+      MEDIA_CONTROL_HOST: ${MEDIA_CONTROL_HOST:?MEDIA_CONTROL_HOST is required}
+      MEDIA_CONTROL_PORT: ${MEDIA_CONTROL_PORT:-8080}
+      MEDIA_SERVER_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}
+    volumes:
+      - ${PWD}/conf/fluent-bit.yaml:/fluent-bit/etc/fluent-bit.yaml:ro
+      - ${PWD}/conf/netif_rates.lua:/fluent-bit/etc/netif_rates.lua:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    pid: host
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M

@@ -49,6 +49,8 @@
 /ios/
 /cmake-build-*
 /3rdpart/ZLToolKit/cmake-build-mq/
+log
+.env
 
 # Local docker build artifacts
 /tools/docker.local/cmake/

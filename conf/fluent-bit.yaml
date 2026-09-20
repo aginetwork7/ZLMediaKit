@@ -27,6 +27,7 @@ pipeline:
       match: host.*
       host: ${MEDIA_CONTROL_HOST}
       port: ${MEDIA_CONTROL_PORT}
+      # tls: true
       metrics_uri: /agi7/api/media-control/hook/on_system_metrics
       logs_uri: /agi7/api/media-control/hook/on_system_metrics
       header: Authorization Bearer ${MEDIA_SERVER_SECRET}

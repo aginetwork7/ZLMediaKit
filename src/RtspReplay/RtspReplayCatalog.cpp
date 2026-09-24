@@ -211,7 +211,6 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
                 seg._file_path = std::move(tempPath);
                 seg._begin_at_ms = fileBeginMs;
                 seg._end_at_ms = fileEndMs;
-                seg._duration_ms = fileEndMs - fileBeginMs;
                 ret._segments.emplace_back(std::move(seg));
                 continue;
             }
@@ -233,7 +232,6 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
             seg._file_path = datePath + "/" + fname;
             seg._begin_at_ms = fileBeginMs;
             seg._end_at_ms = fileEndMs;
-            seg._duration_ms = fileEndMs - fileBeginMs;
             ret._segments.emplace_back(std::move(seg));
         }
         closedir(pSubDir);
@@ -250,14 +248,23 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
     // 文件录制时，_begin 是录制开始的墙上时钟秒，_end 由录制时算出的时长推得不够精确，上一段_end可能和下一段_begin重叠，两者并不保证首尾相接
     // 一旦相邻分片重叠，播放跨过分片边界时全局 dts 就会倒退，迫使 paced sender 把缓存整批冲出去，表现为画面顿挫。
     // 因此要做裁剪保证后一个分片的起点即前一个分片的终点。
-    for (size_t i = 0; i + 1 < ret._segments.size(); ++i) {
-        auto &cur = ret._segments[i];
-        const auto &next = ret._segments[i + 1];
+    // 与最近一个保留下来的分片比较：next 完全落在 cur 内时丢弃 next，保留 cur 的完整时长，避免把 cur 的后半段裁掉。
+    // Compare against the last kept segment: when next lies entirely inside cur, drop next and keep cur whole,
+    // instead of cutting off cur's tail.
+    size_t last = 0;
+    for (size_t i = 1; i < ret._segments.size(); ++i) {
+        auto &cur = ret._segments[last];
+        auto &next = ret._segments[i];
+        if (next._end_at_ms <= cur._end_at_ms) {
+            next._end_at_ms = next._begin_at_ms;
+            continue;
+        }
         if (cur._end_at_ms > next._begin_at_ms) {
             cur._end_at_ms = next._begin_at_ms;
         }
+        last = i;
     }
-    // 裁剪后可能留下零长度分片(同一秒内开始的两个文件)，它们已被后一个分片完全覆盖，直接丢弃，
+    // 裁剪后可能留下零长度分片(被前一个分片完全覆盖，或与更长的后一个分片同一秒开始)，直接丢弃，
     // 否则 reader 会为一个取不出任何帧的分片白白开一次 mp4。
     ret._segments.erase(
         remove_if(ret._segments.begin(), ret._segments.end(),

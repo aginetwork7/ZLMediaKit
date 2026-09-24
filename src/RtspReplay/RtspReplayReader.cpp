@@ -50,6 +50,8 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
     _window_begin_offset_ms = absoluteToOffset(_window_begin_at_ms);
     _window_end_offset_ms = absoluteToOffset(_window_end_at_ms);
 
+    // 仅作标识：replay://<shortUrl>?begin=<窗口起点epoch毫秒>&end=<窗口终点epoch毫秒>&segments=<分片数>，不可解析为文件路径。
+    // Identifier only: begin/end are epoch milliseconds (not the seconds used in replay URLs); not resolvable to files.
     _origin_url = "replay://" + tuple.shortUrl() +
                   "?begin=" + std::to_string(_catalog._window_begin_at_ms) +
                   "&end=" + std::to_string(_catalog._window_end_at_ms) +
@@ -332,6 +334,8 @@ bool RtspReplayReader::openSegmentByIndex(size_t segment_index, uint64_t local_s
 
 size_t RtspReplayReader::locateSegmentByAbsolute(uint64_t abs_ms) const {
     // 二分搜索定位包含 abs_ms 的分片，若不存在则返回第一个起点大于 abs_ms 的分片索引。
+    // 前提：_segments 按 _begin_at_ms 升序且互不重叠（由 RtspReplayCatalog::build 的排序与裁剪保证）。
+    // Precondition: _segments sorted by _begin_at_ms and non-overlapping (guaranteed by RtspReplayCatalog::build).
     auto it = std::upper_bound(_catalog._segments.begin(), _catalog._segments.end(), abs_ms,
                                [](uint64_t value, const RtspReplaySegment &segment) {
                                    return value < segment._begin_at_ms;
@@ -342,7 +346,7 @@ size_t RtspReplayReader::locateSegmentByAbsolute(uint64_t abs_ms) const {
         return index - 1;
     }
     // Target hits a gap, or lies past the last segment: return the first segment after it, which is
-    // _segments.size() when there is none. Same contract as before.
+    // _segments.size() when there is none.
     return index;
 }
 

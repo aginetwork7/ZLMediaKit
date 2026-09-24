@@ -26,6 +26,17 @@ using namespace toolkit;
 
 namespace mediakit {
 
+// 判定临时文件「是否仍在被写入」的宽限期。它必须盖住录像落盘的全部滞后：mp4 的 stdio 写缓存
+// (record.fileBufSize)、fmp4 分片要等到下一个关键帧才收尾、以及网络文件系统的属性缓存。
+// 取大只会让中断残留的临时文件多留一小段尾巴；取小则会误判正在录制的文件已经结束，削掉回放
+// 时间轴的末端，所以这里偏向保守。
+// Grace period used to decide whether a temp file is still being written. It has to cover every
+// source of write lag: the mp4 stdio buffer (record.fileBufSize), fmp4 fragments only being sealed
+// on the next key frame, and attribute caching on network filesystems. Erring large merely leaves a
+// short tail on temp files stranded by an interrupted recording; erring small would misjudge a file
+// that is still recording and cut the end off the replay timeline, so this leans conservative.
+static constexpr uint64_t kTempWriteGraceMs = 30 * 1000;
+
 static bool isDateDir(const string &name) {
     return name.size() == 10 && name[4] == '-' && name[7] == '-';
 }
@@ -175,8 +186,20 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
                     continue;
                 }
 
+                auto tempPath = datePath + "/" + fname;
+                struct stat tempStat = {};
+                if (stat(tempPath.c_str(), &tempStat) != 0) {
+                    // 刚好被 finalize 成正式文件名或已被删除，交给正式文件那一支处理
+                    // Just finalized into its final name, or already removed; the regular branch covers it
+                    continue;
+                }
+
                 auto fileBeginMs = (uint64_t)tempStart * 1000;
-                auto fileEndMs = temp_end_ms;
+                // 临时文件的终点取「最后一次写入时间」，而不是无条件假定它一直录到现在。
+                // 仍在录制的文件 mtime 紧跟当前时刻，加上宽限期后必然盖过 temp_end_ms，既保证"立刻拉当前时刻前若干秒"的语义
+                // 也不会因为储存等异常伪造出一段延续至今的录像。
+                auto liveUntilMs = (uint64_t)tempStat.st_mtime * 1000 + kTempWriteGraceMs;
+                auto fileEndMs = std::min(temp_end_ms, liveUntilMs);
                 if (fileEndMs <= fileBeginMs) {
                     continue;
                 }
@@ -185,7 +208,7 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
                 }
 
                 RtspReplaySegment seg;
-                seg._file_path = datePath + "/" + fname;
+                seg._file_path = std::move(tempPath);
                 seg._begin_at_ms = fileBeginMs;
                 seg._end_at_ms = fileEndMs;
                 seg._duration_ms = fileEndMs - fileBeginMs;
@@ -223,6 +246,26 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
         }
         return l._file_path < r._file_path;
     });
+
+    // 文件录制时，_begin 是录制开始的墙上时钟秒，_end 由录制时算出的时长推得不够精确，上一段_end可能和下一段_begin重叠，两者并不保证首尾相接
+    // 一旦相邻分片重叠，播放跨过分片边界时全局 dts 就会倒退，迫使 paced sender 把缓存整批冲出去，表现为画面顿挫。
+    // 因此要做裁剪保证后一个分片的起点即前一个分片的终点。
+    for (size_t i = 0; i + 1 < ret._segments.size(); ++i) {
+        auto &cur = ret._segments[i];
+        const auto &next = ret._segments[i + 1];
+        if (cur._end_at_ms > next._begin_at_ms) {
+            cur._end_at_ms = next._begin_at_ms;
+        }
+    }
+    // 裁剪后可能留下零长度分片(同一秒内开始的两个文件)，它们已被后一个分片完全覆盖，直接丢弃，
+    // 否则 reader 会为一个取不出任何帧的分片白白开一次 mp4。
+    ret._segments.erase(
+        remove_if(ret._segments.begin(), ret._segments.end(),
+                  [](const RtspReplaySegment &seg) { return seg._end_at_ms <= seg._begin_at_ms; }),
+        ret._segments.end());
+    for (auto &seg : ret._segments) {
+        seg._duration_ms = seg._end_at_ms - seg._begin_at_ms;
+    }
     return ret;
 }
 

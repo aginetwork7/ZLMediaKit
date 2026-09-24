@@ -50,28 +50,25 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
     _window_begin_offset_ms = absoluteToOffset(_window_begin_at_ms);
     _window_end_offset_ms = absoluteToOffset(_window_end_at_ms);
 
-    std::string file_list;
-    file_list.reserve(_catalog._segments.size() * 128);
-    for (size_t i = 0; i < _catalog._segments.size(); ++i) {
-        if (i > 0) {
-            file_list.push_back(';');
-        }
-        file_list.append(_catalog._segments[i]._file_path);
-    }
-    _origin_url = file_list;
+    // 仅作标识：replay://<shortUrl>?begin=<窗口起点epoch毫秒>&end=<窗口终点epoch毫秒>&segments=<分片数>，不可解析为文件路径。
+    // Identifier only: begin/end are epoch milliseconds (not the seconds used in replay URLs); not resolvable to files.
+    _origin_url = "replay://" + tuple.shortUrl() +
+                  "?begin=" + std::to_string(_catalog._window_begin_at_ms) +
+                  "&end=" + std::to_string(_catalog._window_end_at_ms) +
+                  "&segments=" + std::to_string(_catalog._segments.size());
 
     _poller = poller ? std::move(poller) : WorkThreadPool::Instance().getPoller();
 
    
     auto replay_window_dur_sec = (_catalog._window_end_at_ms - _catalog._window_begin_at_ms) / 1000.0f;
     _muxer = std::make_shared<MultiMediaSourceMuxer>(tuple, replay_window_dur_sec, option);
+    // 取覆盖窗口起点的分片，没有覆盖就退回第一个。
     size_t probe_index = 0;
-    for (size_t i = 0; i < _catalog._segments.size(); ++i) {
-        const auto &seg = _catalog._segments[i];
-        if (_catalog._window_begin_at_ms >= seg._begin_at_ms && _catalog._window_begin_at_ms < seg._end_at_ms) {
-            probe_index = i;
-            break;
-        }
+    auto probe_hit = locateSegmentByAbsolute(_catalog._window_begin_at_ms);
+    if (probe_hit < _catalog._segments.size() &&
+        _catalog._window_begin_at_ms >= _catalog._segments[probe_hit]._begin_at_ms &&
+        _catalog._window_begin_at_ms < _catalog._segments[probe_hit]._end_at_ms) {
+        probe_index = probe_hit;
     }
 
     const auto &probe_segment = _catalog._segments[probe_index];
@@ -336,17 +333,21 @@ bool RtspReplayReader::openSegmentByIndex(size_t segment_index, uint64_t local_s
 }
 
 size_t RtspReplayReader::locateSegmentByAbsolute(uint64_t abs_ms) const {
-    for (size_t i = 0; i < _catalog._segments.size(); ++i) {
-        const auto &segment = _catalog._segments[i];
-        if (abs_ms < segment._begin_at_ms) {
-            // Target hits a gap, return the first segment after the gap.
-            return i;
-        }
-        if (abs_ms < segment._end_at_ms) {
-            return i;
-        }
+    // 二分搜索定位包含 abs_ms 的分片，若不存在则返回第一个起点大于 abs_ms 的分片索引。
+    // 前提：_segments 按 _begin_at_ms 升序且互不重叠（由 RtspReplayCatalog::build 的排序与裁剪保证）。
+    // Precondition: _segments sorted by _begin_at_ms and non-overlapping (guaranteed by RtspReplayCatalog::build).
+    auto it = std::upper_bound(_catalog._segments.begin(), _catalog._segments.end(), abs_ms,
+                               [](uint64_t value, const RtspReplaySegment &segment) {
+                                   return value < segment._begin_at_ms;
+                               });
+    auto index = (size_t)(it - _catalog._segments.begin());
+    if (index > 0 && abs_ms < _catalog._segments[index - 1]._end_at_ms) {
+        // Inside that segment.
+        return index - 1;
     }
-    return _catalog._segments.size();
+    // Target hits a gap, or lies past the last segment: return the first segment after it, which is
+    // _segments.size() when there is none.
+    return index;
 }
 
 bool RtspReplayReader::openSegmentByOffset(uint32_t target_offset_ms) {
@@ -395,6 +396,8 @@ Frame::Ptr RtspReplayReader::readFrameWithSegmentSwitch(bool &keyFrame, bool &eo
             return nullptr;
         }
 
+        auto prev_segment_index = _active_segment_index;
+        auto prev_end_offset_ms = _active_segment_end_offset_ms;
         auto next_segment_index = _active_segment_index + 1;
         while (next_segment_index < _catalog._segments.size()) {
             const auto &next_segment = _catalog._segments[next_segment_index];
@@ -403,6 +406,17 @@ Frame::Ptr RtspReplayReader::readFrameWithSegmentSwitch(bool &keyFrame, bool &eo
                 return nullptr;
             }
             if (openSegmentByIndex(next_segment_index, 0)) {
+                // 分片切换是时间轴上唯一的不连续点，而两侧的偏移来自不同文件名的不同字段。
+                // 把交接处的三个偏移一起打出来，dts 倒退时才能直接对上是哪一对分片边界没接上，
+                // 不必再去反推。
+                // A segment switch is the one discontinuity on the timeline, and the offsets on
+                // either side come from different fields of different file names. Logging all three
+                // offsets at the hand-over makes a dts regression attributable to a specific pair of
+                // segment boundaries instead of having to be reconstructed after the fact.
+                DebugL << "replay segment switch: " << prev_segment_index << " -> " << next_segment_index
+                       << ", prev_end_offset_ms=" << prev_end_offset_ms
+                       << ", next_begin_offset_ms=" << _active_segment_begin_offset_ms
+                       << ", last_frame_offset_ms=" << _last_dts;
                 eof = false;
                 break;
             }

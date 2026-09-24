@@ -12,8 +12,10 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -63,6 +65,30 @@ void updateMax(atomic<uint64_t> &maximum, uint64_t value) {
     }
 }
 
+bool loadInputURLs(const string &file_name, vector<string> &urls, string &error) {
+    ifstream input(file_name);
+    if (!input) {
+        error = "无法打开 replay URL 文件: " + file_name;
+        return false;
+    }
+
+    string line;
+    while (getline(input, line)) {
+        const auto begin = line.find_first_not_of(" \t\r\n");
+        if (begin == string::npos || line[begin] == '#') {
+            continue;
+        }
+        const auto end = line.find_last_not_of(" \t\r\n");
+        urls.emplace_back(line.substr(begin, end - begin + 1));
+    }
+
+    if (urls.empty()) {
+        error = "replay URL 文件为空: " + file_name;
+        return false;
+    }
+    return true;
+}
+
 void printBenchmarkStatus(const char *phase, const BenchmarkContext &benchmark_context, int player_count) {
     const auto succeeded = benchmark_context.stats.succeeded.load();
     const auto failed = benchmark_context.stats.failed.load();
@@ -92,8 +118,10 @@ public:
                              "日志等级，LTrace~LError(0~4)", nullptr);
         (*_parser) << Option('t', "threads", Option::ArgRequired, "0", false,
                      "客户端事件线程数；0 自动按每 64 路客户端至少分配一个 poller", nullptr);
-        (*_parser) << Option('i', "in", Option::ArgRequired, nullptr, true,
-                             "回放 RTSP URL（认证信息使用标准 rtsp://user:password@host/... 形式）", nullptr);
+        (*_parser) << Option('i', "in", Option::ArgRequired, "", false,
+                     "单个回放 RTSP URL；不能与 --in-file 同时使用", nullptr);
+        (*_parser) << Option(0, "in-file", Option::ArgRequired, "", false,
+                     "回放 RTSP URL 文件：每行一个 URL，客户端按顺序轮转", nullptr);
         (*_parser) << Option('c', "count", Option::ArgRequired, "100", false,
                              "并发回放客户端数量", nullptr);
         (*_parser) << Option('d', "delay", Option::ArgRequired, "100", false,
@@ -131,6 +159,7 @@ int main(int argc, char *argv[]) {
     const auto requested_threads = cmd_main["threads"].as<int>();
     const auto log_level = static_cast<LogLevel>(MIN(MAX(cmd_main["level"].as<int>(), LTrace), LError));
     auto input_url = cmd_main["in"].as<string>();
+    const auto input_file = cmd_main["in-file"].as<string>();
     const auto player_count = cmd_main["count"].as<int>();
     const auto delay_ms = cmd_main["delay"].as<int>();
     const auto duration_sec = cmd_main["duration"].as<int>();
@@ -138,6 +167,24 @@ int main(int argc, char *argv[]) {
     const auto media_duration_sec = cmd_main["media-duration"].as<int>();
     const auto setup_timeout_ms = cmd_main["setup-timeout"].as<int>();
     const auto rtp_type = cmd_main["rtp"].as<int>();
+
+    vector<string> input_urls;
+    if (!input_url.empty() && !input_file.empty()) {
+        cerr << "--in 与 --in-file 不能同时使用" << endl;
+        return -1;
+    }
+    if (!input_file.empty()) {
+        string error;
+        if (!loadInputURLs(input_file, input_urls, error)) {
+            cerr << error << endl;
+            return -1;
+        }
+    } else if (!input_url.empty()) {
+        input_urls.emplace_back(std::move(input_url));
+    } else {
+        cerr << "必须指定 --in 或 --in-file" << endl;
+        return -1;
+    }
 
     if (requested_threads < 0 || player_count <= 0 || delay_ms < 0 || duration_sec < 0 || warmup_sec < 0 || media_duration_sec <= 0 || setup_timeout_ms <= 0) {
         cerr << "threads、delay、duration 和 warmup 不能为负数；count、media-duration 和 setup-timeout 必须大于 0" << endl;
@@ -178,6 +225,7 @@ int main(int argc, char *argv[]) {
           << ", duration_sec=" << duration_sec
           << ", media_duration_sec=" << media_duration_sec
           << ", setup_timeout_ms=" << setup_timeout_ms
+            << ", input_url_count=" << input_urls.size()
           << ", rtp_type=" << rtp_type;
 
     Ticker ramp_ticker;
@@ -223,7 +271,7 @@ int main(int argc, char *argv[]) {
         (*player)[Client::kRtpType] = rtp_type;
 
         players.emplace_back(player);
-        player->play(input_url);
+        player->play(input_urls[index % input_urls.size()]);
 
         if (delay_ms > 0 && index + 1 < player_count) {
             this_thread::sleep_for(chrono::milliseconds(delay_ms));

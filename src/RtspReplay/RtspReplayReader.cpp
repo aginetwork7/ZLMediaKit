@@ -62,13 +62,13 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
    
     auto replay_window_dur_sec = (_catalog._window_end_at_ms - _catalog._window_begin_at_ms) / 1000.0f;
     _muxer = std::make_shared<MultiMediaSourceMuxer>(tuple, replay_window_dur_sec, option);
-    // 取覆盖窗口起点的分片，没有覆盖就退回第一个。
     size_t probe_index = 0;
-    auto probe_hit = locateSegmentByAbsolute(_catalog._window_begin_at_ms);
-    if (probe_hit < _catalog._segments.size() &&
-        _catalog._window_begin_at_ms >= _catalog._segments[probe_hit]._begin_at_ms &&
-        _catalog._window_begin_at_ms < _catalog._segments[probe_hit]._end_at_ms) {
-        probe_index = probe_hit;
+    for (size_t i = 0; i < _catalog._segments.size(); ++i) {
+        const auto &seg = _catalog._segments[i];
+        if (_catalog._window_begin_at_ms >= seg._begin_at_ms && _catalog._window_begin_at_ms < seg._end_at_ms) {
+            probe_index = i;
+            break;
+        }
     }
 
     const auto &probe_segment = _catalog._segments[probe_index];
@@ -333,21 +333,17 @@ bool RtspReplayReader::openSegmentByIndex(size_t segment_index, uint64_t local_s
 }
 
 size_t RtspReplayReader::locateSegmentByAbsolute(uint64_t abs_ms) const {
-    // 二分搜索定位包含 abs_ms 的分片，若不存在则返回第一个起点大于 abs_ms 的分片索引。
-    // 前提：_segments 按 _begin_at_ms 升序且互不重叠（由 RtspReplayCatalog::build 的排序与裁剪保证）。
-    // Precondition: _segments sorted by _begin_at_ms and non-overlapping (guaranteed by RtspReplayCatalog::build).
-    auto it = std::upper_bound(_catalog._segments.begin(), _catalog._segments.end(), abs_ms,
-                               [](uint64_t value, const RtspReplaySegment &segment) {
-                                   return value < segment._begin_at_ms;
-                               });
-    auto index = (size_t)(it - _catalog._segments.begin());
-    if (index > 0 && abs_ms < _catalog._segments[index - 1]._end_at_ms) {
-        // Inside that segment.
-        return index - 1;
+    for (size_t i = 0; i < _catalog._segments.size(); ++i) {
+        const auto &segment = _catalog._segments[i];
+        if (abs_ms < segment._begin_at_ms) {
+            // Target hits a gap, return the first segment after the gap.
+            return i;
+        }
+        if (abs_ms < segment._end_at_ms) {
+            return i;
+        }
     }
-    // Target hits a gap, or lies past the last segment: return the first segment after it, which is
-    // _segments.size() when there is none.
-    return index;
+    return _catalog._segments.size();
 }
 
 bool RtspReplayReader::openSegmentByOffset(uint32_t target_offset_ms) {

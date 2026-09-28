@@ -95,6 +95,9 @@ RtspReplayRequest RtspReplayCatalog::parseRequest(const string &schema, const st
         throw invalid_argument("invalid replay timestamp");
     }
 
+    // Backward compatibility: replay URLs may use Unix seconds or milliseconds. Current Unix
+    // timestamps in seconds are about 1e9, while milliseconds are about 1e12, so this boundary
+    // treats values below 1e12 as seconds and normalizes them to milliseconds.
     constexpr uint64_t kSecMsThreshold = 1000000000000ULL;
     if (begin_ms < kSecMsThreshold) {
         begin_ms *= 1000;
@@ -180,6 +183,8 @@ RtspReplayCatalogResult RtspReplayCatalog::build(const RtspReplayRequest &reques
                 continue;
             }
 
+            // ZLM writes an in-progress MP4 under a dot-prefixed temporary name, then renames it
+            // to the regular record-file name only after the segment has been finalized.
             if (fname[0] == '.') {
                 time_t tempStart = 0;
                 if (!parseTempRecordFileName(fname, tempStart, nullptr)) {

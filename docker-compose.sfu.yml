@@ -13,6 +13,7 @@ services:
       EXTERN_IP: ${EXTERN_IP:?EXTERN_IP is required}
     volumes:
       - ${PWD}/log:/opt/media/bin/log
+      # - ${PWD}/conf:/opt/media/conf
     cap_add:
       - SYS_NICE
     ulimits:
@@ -59,3 +60,10 @@ services:
         reservations:
           cpus: '0.25'
           memory: 256M
+    networks:
+      - agi7
+
+networks:
+  agi7:
+    name: agi7
+    external: true

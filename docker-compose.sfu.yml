@@ -62,6 +62,8 @@ services:
           memory: 256M
     networks:
       - agi7
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 networks:
   agi7:

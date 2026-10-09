@@ -7,9 +7,10 @@ pipeline:
     - name: cpu
       tag: host.cpu
       interval_sec: ${METRICS_INTERVAL_SEC}
-    - name: mem
-      tag: host.mem
-      interval_sec: ${METRICS_INTERVAL_SEC}
+    - name: node_exporter_metrics
+      metrics: meminfo
+      tag: host.meminfo
+      scrape_interval: ${METRICS_INTERVAL_SEC}
     - name: netif
       tag: host.netif
       interface: eth0

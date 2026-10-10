@@ -241,6 +241,9 @@ ArgsType make_json(const MediaInfo &args) {
     }
     dumpMediaTuple(args, body);
     body["params"] = args.params;
+	if (!args.authorization.empty()) {
+		body["authorization"] = args.authorization;
+	}
     return body;
 }
 

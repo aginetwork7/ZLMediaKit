@@ -26,6 +26,7 @@
 #include "WebRtcTransport.h"
 
 #include "WebRtcEchoTest.h"
+#include "MultiSourceWebRtcPusher/MultiSourceWebRtcPusher.h"
 #include "WebRtcPlayer.h"
 #include "WebRtcPusher.h"
 #include "WebRtcTalk.h"
@@ -273,6 +274,7 @@ const char* WebRtcTransport::RoleStr(Role role) {
 
 WebRtcTransport::WebRtcTransport(const EventPoller::Ptr &poller) {
     _poller = poller;
+    _create_time_ms = getCurrentMillisecond(true);
     static auto prefix = getServerPrefix();
     _identifier = prefix + to_string(++s_key);
     _packet_pool.setSize(64);
@@ -387,6 +389,7 @@ void WebRtcTransport::connectivityCheckForSFU() {
 
 void WebRtcTransport::onIceTransportCompleted() {
     InfoL << getIdentifier();
+    updateNetworkInfo(_ice_agent->getSelectedPair(), true);
 
     if (!_answer_sdp) {
         onShutdown(SockException(Err_other, "answer sdp not ready"));
@@ -554,7 +557,7 @@ void WebRtcTransport::OnSctpAssociationMessageReceived(
     params.streamId = streamId;
 
     GET_CONFIG(bool, datachannel_echo, Rtc::kDataChannelEcho);
-    if (datachannel_echo) {
+    if (datachannel_echo && enableDatachannelEcho()) {
         // 回显数据  [AUTO-TRANSLATED:7868d3a4]
         // Echo data
         _sctp->SendSctpMessage(params, ppid, msg, len);
@@ -591,6 +594,52 @@ void WebRtcTransport::sendSockData(const char *buf, size_t len, const IceTranspo
 Session::Ptr WebRtcTransport::getSession() const {
     auto pair = _ice_agent->getSelectedPair();
     return pair ? static_pointer_cast<Session>(pair->_socket->shared_from_this()) : nullptr;
+}
+
+WebRtcTransport::NetworkInfo WebRtcTransport::getNetworkInfo() const {
+    lock_guard<mutex> lock(_network_info_mtx);
+    return _network_info;
+}
+
+void WebRtcTransport::updateNetworkInfo(const IceTransport::Pair::Ptr &pair, bool force) {
+    if (!pair || !pair->_socket || !pair->_socket->getSock()) {
+        return;
+    }
+    if (!force && _network_info_ready.load(memory_order_relaxed)) {
+        return;
+    }
+    lock_guard<mutex> lock(_network_info_mtx);
+    auto info = _ice_agent->getSelectedPairInfo();
+    auto network_type = pair->_socket->getSock()->sockType() == SockNum::Sock_TCP ? "tcp" : "udp";
+    if (!info.isMember("localCandidate")) {
+        info["localCandidate"]["address"] = pair->get_local_ip() + ":" + to_string(pair->get_local_port());
+        info["localCandidate"]["type"] = "host";
+        info["localCandidate"]["transport"] = network_type;
+        info["localCandidate"]["state"] = "connected";
+    }
+    if (!info.isMember("remoteCandidate")) {
+        info["remoteCandidate"]["address"] = pair->get_peer_ip() + ":" + to_string(pair->get_peer_port());
+        info["remoteCandidate"]["type"] = "host";
+        info["remoteCandidate"]["transport"] = network_type;
+        info["remoteCandidate"]["state"] = "connected";
+    }
+    auto &local_candidate = info["localCandidate"];
+    _network_info.local_candidate = local_candidate["address"].asString() + " /" + local_candidate["type"].asString() + "/" + local_candidate["transport"].asString() + " (" + local_candidate["state"].asString() + ")";
+    auto &remote_candidate = info["remoteCandidate"];
+    _network_info.remote_candidate = remote_candidate["address"].asString() + " /" + remote_candidate["type"].asString() + "/" + remote_candidate["transport"].asString() + " (" + remote_candidate["state"].asString() + ")";
+    _network_info_ready.store(true, memory_order_relaxed);
+}
+
+string WebRtcTransport::getHealth() const {
+    auto last_activity = _last_activity_ms.load(memory_order_relaxed);
+    if (!last_activity || getCurrentMillisecond() - last_activity > getTimeOutSec() * 1000) {
+        return "unhealthy";
+    }
+    return "healthy";
+}
+
+void WebRtcTransport::markActivity() {
+    _last_activity_ms.store(getCurrentMillisecond(), memory_order_relaxed);
 }
 
 void WebRtcTransport::removePair(const SocketHelper *socket) {
@@ -747,6 +796,10 @@ void WebRtcTransport::inputSockData(const char *buf, int len, const SocketHelper
 
 void WebRtcTransport::inputSockData(const char *buf, int len, const IceTransport::Pair::Ptr& pair) {
     // DebugL;
+    if (len > 0) {
+        addRecvBytes((size_t)len);
+        updateNetworkInfo(pair);
+    }
     _recv_ticker.resetTime();
     if (_ice_agent->processSocketData((const uint8_t *)buf, len, pair)) {
         return;
@@ -855,6 +908,9 @@ void WebRtcTransportImp::onDestory() {
 }
 
 void WebRtcTransportImp::onSendSockData(Buffer::Ptr buf, bool flush, const IceTransport::Pair::Ptr& pair) {
+    if (buf) {
+        addSendBytes(buf->size());
+    }
     return _ice_agent->sendSocketData(buf, pair, flush);
 }
 
@@ -892,11 +948,35 @@ bool WebRtcTransportImp::canRecvRtp() const {
 void WebRtcTransportImp::onStartWebRTC() {
     // 获取ssrc和pt相关信息,届时收到rtp和rtcp时分别可以根据pt和ssrc找到相关的信息  [AUTO-TRANSLATED:39828247]
     // Get ssrc and pt related information, so that when receiving rtp and rtcp, you can find the relevant information according to pt and ssrc respectively
+    vector<const RtcMedia *> offer_audio_list;
+    vector<const RtcMedia *> offer_video_list;
+    offer_audio_list.reserve(_offer_sdp->media.size());
+    offer_video_list.reserve(_offer_sdp->media.size());
+    for (auto &m_offer : _offer_sdp->media) {
+        if (m_offer.type == TrackAudio) {
+            offer_audio_list.emplace_back(&m_offer);
+        } else if (m_offer.type == TrackVideo) {
+            offer_video_list.emplace_back(&m_offer);
+        }
+    }
+
+    size_t offer_audio_index = 0;
+    size_t offer_video_index = 0;
+
     for (auto &m_answer : _answer_sdp->media) {
         if (m_answer.type == TrackApplication) {
             continue;
         }
-        auto m_offer = _offer_sdp->getMedia(m_answer.type);
+
+        const RtcMedia *m_offer = nullptr;
+        if (m_answer.type == TrackAudio) {
+            CHECK(offer_audio_index < offer_audio_list.size(), "audio m-line count mismatch between offer/answer");
+            m_offer = offer_audio_list[offer_audio_index++];
+        } else {
+            CHECK(offer_video_index < offer_video_list.size(), "video m-line count mismatch between offer/answer");
+            m_offer = offer_video_list[offer_video_index++];
+        }
+
         auto track = std::make_shared<MediaTrack>();
 
         track->media = &m_answer;
@@ -925,9 +1005,15 @@ void WebRtcTransportImp::onStartWebRTC() {
         // rtp pt --> MediaTrack
         _pt_to_track.emplace(
             track->plan_rtp->pt, std::unique_ptr<WrappedMediaTrack>(new WrappedRtpTrack(track, _twcc_ctx, *this)));
+        if (track->offer_ssrc_rtp) {
+            _ssrc_to_wrapped_track[track->offer_ssrc_rtp] = std::unique_ptr<WrappedMediaTrack>(new WrappedRtpTrack(track, _twcc_ctx, *this));
+        }
         if (track->plan_rtx) {
             // rtx pt --> MediaTrack
             _pt_to_track.emplace(track->plan_rtx->pt, std::unique_ptr<WrappedMediaTrack>(new WrappedRtxTrack(track)));
+            if (track->offer_ssrc_rtx) {
+                _ssrc_to_wrapped_track[track->offer_ssrc_rtx] = std::unique_ptr<WrappedMediaTrack>(new WrappedRtxTrack(track));
+            }
         }
         // 记录rtp ext类型与id的关系，方便接收或发送rtp时修改rtp ext id  [AUTO-TRANSLATED:5736bd34]
         // Record the relationship between rtp ext type and id, which is convenient for modifying rtp ext id when receiving or sending rtp
@@ -946,6 +1032,10 @@ void WebRtcTransportImp::onStartWebRTC() {
             // 记录ssrc对应的MediaTrack  [AUTO-TRANSLATED:8e344bc1]
             // Record the MediaTrack corresponding to ssrc
             _ssrc_to_track[ssrc.ssrc] = track;
+            _ssrc_to_wrapped_track[ssrc.ssrc] = std::unique_ptr<WrappedMediaTrack>(new WrappedRtpTrack(track, _twcc_ctx, *this));
+            if (ssrc.rtx_ssrc) {
+                _ssrc_to_wrapped_track[ssrc.rtx_ssrc] = std::unique_ptr<WrappedMediaTrack>(new WrappedRtxTrack(track));
+            }
             if (m_offer->rtp_rids.size() > index) {
                 // 支持firefox的simulcast, 提前映射好ssrc和rid的关系  [AUTO-TRANSLATED:86f3e5bf]
                 // Support firefox's simulcast, map the relationship between ssrc and rid in advance
@@ -1214,7 +1304,7 @@ void WebRtcTransportImp::onRtcp(const char *buf, size_t len) {
                 auto &track = it->second;
                 auto rtp_chn = track->getRtpChannel(sr->ssrc);
                 if (!rtp_chn) {
-                    WarnL << "未识别的sr rtcp包:" << rtcp->dumpString();
+                    //WarnL << "未识别的sr rtcp包:" << rtcp->dumpString();
                 } else {
                     // 设置rtp时间戳与ntp时间戳的对应关系  [AUTO-TRANSLATED:e92f4749]
                     // Set the correspondence between rtp timestamp and ntp timestamp
@@ -1222,7 +1312,7 @@ void WebRtcTransportImp::onRtcp(const char *buf, size_t len) {
                     rtp_chn->onRtcp(sr);
                 }
             } else {
-                WarnL << "未识别的sr rtcp包:" << rtcp->dumpString();
+                //WarnL << "未识别的sr rtcp包:" << rtcp->dumpString();
             }
             break;
         }
@@ -1338,6 +1428,28 @@ void WebRtcTransportImp::onRtp(const char *buf, size_t len, uint64_t stamp_ms) {
     _alive_ticker.resetTime();
 
     RtpHeader *rtp = (RtpHeader *)buf;
+    auto ssrc = ntohl(rtp->ssrc);
+
+    auto it_by_ssrc = _ssrc_to_wrapped_track.find(ssrc);
+    if (it_by_ssrc != _ssrc_to_wrapped_track.end()) {
+        if (_rtcp_rr_send_ticker.elapsedTime() > 5000) {
+            _rtcp_rr_send_ticker.resetTime();
+            for (auto& it : _ssrc_to_track) {
+                auto report_ssrc = it.first;
+                auto &track = it.second;
+                auto rtp_chn = track->getRtpChannel(report_ssrc);
+                if (rtp_chn) {
+                    auto rr = rtp_chn->createRtcpRR(track->answer_ssrc_rtp);
+                    if (rr && rr->size() > 0) {
+                        sendRtcpPacket(rr->data(), rr->size(), true);
+                    }
+                }
+            }
+        }
+        it_by_ssrc->second->inputRtp(buf, len, stamp_ms, rtp);
+        return;
+    }
+
     // 根据接收到的rtp的pt信息，找到该流的信息  [AUTO-TRANSLATED:9a97682c]
     // Find the information of the stream according to the pt information of the received rtp
     auto it = _pt_to_track.find(rtp->pt);
@@ -1625,6 +1737,20 @@ void WebRtcTransportManager::removeItem(const string &key) {
     _map.erase(key);
 }
 
+vector<WebRtcTransportImp::Ptr> WebRtcTransportManager::getItems() {
+    vector<WebRtcTransportImp::Ptr> items;
+    lock_guard<mutex> lck(_mtx);
+    for (auto it = _map.begin(); it != _map.end();) {
+        if (auto item = it->second.lock()) {
+            items.emplace_back(std::move(item));
+            ++it;
+        } else {
+            it = _map.erase(it);
+        }
+    }
+    return items;
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////////
 
 WebRtcPluginManager &WebRtcPluginManager::Instance() {
@@ -1735,6 +1861,7 @@ template<typename Type>
 void play_plugin(SocketHelper &sender, const WebRtcArgs &args, const onCreateWebRtc &cb) {
 
     MediaInfo info(args["url"]);
+	info.authorization = args["Authorization"].data();
     auto session_ptr = static_pointer_cast<Session>(sender.shared_from_this());
     Broadcast::AuthInvoker invoker = [cb, info, session_ptr](const string &err) mutable {
         if (!err.empty()) {
@@ -1770,7 +1897,64 @@ void play_plugin(SocketHelper &sender, const WebRtcArgs &args, const onCreateWeb
     }
 }
 
-static void setWebRtcArgs(const WebRtcArgs &args, WebRtcInterface &rtc) {
+void push_batch_plugin(SocketHelper& sender, const WebRtcArgs &args, const onCreateWebRtc &cb) {
+    MediaInfo info(args["url"]);
+    info.authorization = args["Authorization"].data();
+    auto stream_count = (size_t)std::max<int>(atoi(std::string(args["streamCount"]).data()), 1);
+
+    if (BatchPublishSessionManager::Instance().getSession(info.app, info.stream)) {
+        cb(WebRtcException(SockException(Err_other, "already publishing")));
+        return;
+    }
+
+    Broadcast::PublishAuthInvoker invoker = [cb, info, stream_count](const string &err, const ProtocolOption &option) mutable {
+        if (!err.empty()) {
+            cb(WebRtcException(SockException(Err_other, err)));
+            return;
+        }
+
+        auto rtc = MultiSourceWebRtcPusher::create(EventPollerPool::Instance().getPoller(), info, option, stream_count,
+            WebRtcTransport::Role::PEER, WebRtcTransport::SignalingProtocols::WHEP_WHIP);
+        cb(*rtc);
+    };
+
+    auto flag = NOTICE_EMIT(BroadcastMediaPublishArgs, Broadcast::kBroadcastMediaPublish, MediaOriginType::rtc_push, info, invoker, sender);
+    if (!flag) {
+        invoker("", ProtocolOption());
+    }
+}
+
+static string getWebRtcSessionType(const string &source, const string &type) {
+    if (source == "whep" && type == "play") {
+        return "whep_player";
+    }
+    if (source == "whip" && type == "push") {
+        return "whip_publisher";
+    }
+    if (source == "whip_batch" && type == "push_batch") {
+        return "whip_batch_publisher";
+    }
+    if (source == "webrtc_api") {
+        if (type == "play") {
+            return "webrtc_api_player";
+        }
+        if (type == "push") {
+            return "webrtc_api_publisher";
+        }
+    }
+    if (source == "websocket") {
+        if (type == "play") {
+            return "websocket_player";
+        }
+        if (type == "push") {
+            return "websocket_publisher";
+        }
+    }
+    return source.empty() ? type : source + "_" + type;
+}
+
+static void setWebRtcArgs(const WebRtcArgs &args, const string &type, WebRtcInterface &rtc) {
+    rtc.setSessionType(getWebRtcSessionType(args["session_source"], type));
     {
         static auto is_vaild_ip = [](const std::string &ip) -> bool {
             int a, b, c, d;
@@ -1824,7 +2008,7 @@ static void setWebRtcArgs(const WebRtcArgs &args, WebRtcInterface &rtc) {
     }
 }
 
-float WebRtcTransport::getTimeOutSec() {
+float WebRtcTransport::getTimeOutSec() const {
     GET_CONFIG(uint32_t, timeout, Rtc::kTimeOutSec);
     if (timeout <= 0) {
         WarnL << "config rtc. " << Rtc::kTimeOutSec << ": " << timeout << " not vaild";
@@ -1841,10 +2025,11 @@ static onceToken s_rtc_auto_register([]() {
 #endif
     WebRtcPluginManager::Instance().registerPlugin("push", push_plugin<WebRtcPusher>);
     WebRtcPluginManager::Instance().registerPlugin("play", play_plugin<WebRtcPlayer>);
+    WebRtcPluginManager::Instance().registerPlugin("push_batch", push_batch_plugin);
     WebRtcPluginManager::Instance().registerPlugin("talk", play_plugin<WebRtcTalk>);
 
     WebRtcPluginManager::Instance().setListener([](SocketHelper& sender, const std::string &type, const WebRtcArgs &args, const WebRtcInterface &rtc) {
-        setWebRtcArgs(args, const_cast<WebRtcInterface&>(rtc));
+        setWebRtcArgs(args, type, const_cast<WebRtcInterface&>(rtc));
     });
 });
 

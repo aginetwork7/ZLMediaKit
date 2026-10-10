@@ -1,0 +1,41 @@
+service:
+  flush: 5
+  log_level: info
+
+pipeline:
+  inputs:
+    - name: cpu
+      tag: host.cpu
+      interval_sec: ${METRICS_INTERVAL_SEC}
+    - name: node_exporter_metrics
+      metrics: meminfo
+      tag: host.meminfo
+      scrape_interval: ${METRICS_INTERVAL_SEC}
+      processors:
+        metrics:
+          - name: metrics_selector
+            metric_name: /^node_memory_(MemTotal|MemAvailable|MemFree)_bytes$/
+            action: include
+          - name: labels
+            upsert: media_server_id ${MEDIA_SERVER_ID}
+    - name: netif
+      tag: host.netif
+      interface: eth0
+      interval_sec: ${METRICS_INTERVAL_SEC}
+  filters:
+    - name: lua
+      match: host.netif.*
+      script: /fluent-bit/etc/netif_rates.lua
+      call: add_bps
+    - name: modify
+      match: host.*
+      add: media_server_id ${MEDIA_SERVER_ID}
+  outputs:
+    - name: opentelemetry
+      match: host.*
+      host: ${MEDIA_CONTROL_HOST}
+      port: ${MEDIA_CONTROL_PORT}
+      # tls: true
+      metrics_uri: /agi7/api/media-control/hook/on_system_metrics
+      logs_uri: /agi7/api/media-control/hook/on_system_metrics
+      header: Authorization Bearer ${MEDIA_SERVER_SECRET}

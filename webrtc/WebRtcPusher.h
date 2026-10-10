@@ -23,6 +23,7 @@ public:
     static Ptr create(const toolkit::EventPoller::Ptr &poller, const RtspMediaSource::Ptr &src,
                       const std::shared_ptr<void> &ownership, const MediaInfo &info, const ProtocolOption &option, 
                       WebRtcTransport::Role role, WebRtcTransport::SignalingProtocols signaling_protocols);
+    const MediaInfo &getMediaInfo() const { return _media_info; }
 
 protected:
     ///////WebRtcTransportImp override///////

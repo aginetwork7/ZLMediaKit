@@ -2023,6 +2023,33 @@ Json::Value IceAgent::getChecklistInfo() const {
     return result;
 }
 
+Json::Value IceAgent::getSelectedPairInfo() const {
+    Json::Value result;
+    if (!_selected_pair) {
+        return result;
+    }
+
+    auto network_type = _selected_pair->_socket && _selected_pair->_socket->getSock()
+        && _selected_pair->_socket->getSock()->sockType() == SockNum::Sock_TCP ? "tcp" : "udp";
+    auto state = string("completed");
+    auto local_type = string("host");
+    auto remote_type = string("host");
+    if (_select_candidate_pair) {
+        state = CandidateInfo::getStateStr(_select_candidate_pair->_state);
+        local_type = _select_candidate_pair->_local_candidate.getAddressTypeStr();
+        remote_type = _select_candidate_pair->_remote_candidate.getAddressTypeStr();
+    }
+    result["localCandidate"]["address"] = _selected_pair->get_local_ip() + ":" + std::to_string(_selected_pair->get_local_port());
+    result["localCandidate"]["type"] = local_type;
+    result["localCandidate"]["transport"] = network_type;
+    result["localCandidate"]["state"] = state;
+    result["remoteCandidate"]["address"] = _selected_pair->get_peer_ip() + ":" + std::to_string(_selected_pair->get_peer_port());
+    result["remoteCandidate"]["type"] = remote_type;
+    result["remoteCandidate"]["transport"] = network_type;
+    result["remoteCandidate"]["state"] = state;
+    return result;
+}
+
 size_t IceAgent::getRecvSpeed() {
     size_t ret = 0;
     for (auto s : _socket_candidate_manager.getAllSockets()) {

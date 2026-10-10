@@ -11,6 +11,13 @@ pipeline:
       metrics: meminfo
       tag: host.meminfo
       scrape_interval: ${METRICS_INTERVAL_SEC}
+      processors:
+        metrics:
+          - name: metrics_selector
+            metric_name: /^node_memory_(MemTotal|MemAvailable|MemFree)_bytes$/
+            action: include
+          - name: labels
+            upsert: media_server_id ${MEDIA_SERVER_ID}
     - name: netif
       tag: host.netif
       interface: eth0

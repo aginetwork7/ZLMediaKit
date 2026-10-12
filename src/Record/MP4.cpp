@@ -60,7 +60,18 @@ MP4FileIO::Reader MP4FileIO::createReader(){
     Ptr self = shared_from_this();
     // 保存自己的强引用，防止提前释放  [AUTO-TRANSLATED:e8e14f60]
     // Save a strong reference to itself to prevent premature release
-    reader.reset(mov_reader_create(&s_io,this),[self](mov_reader_t *ptr){
+    mov_reader_t *raw = nullptr;
+    try {
+        mov_reader_create2(&s_io, this, &raw);
+    } catch (...) {
+        // libmov 的 assert 会抛异常，此时 reader 已解析一半，需在这里释放
+        // libmov assert() throws here; the half-parsed reader must be released by us
+        if (raw) {
+            mov_reader_destroy(raw);
+        }
+        throw;
+    }
+    reader.reset(raw,[self](mov_reader_t *ptr){
         if(ptr){
             mov_reader_destroy(ptr);
         }

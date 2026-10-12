@@ -58,6 +58,12 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
             .. && \
         cmake --build . --parallel $(nproc)
 
+# 导出与镜像同一次编译产出的调试符号：docker build --target symbols --output type=local,dest=./symbols .
+# Export debug symbols from the same build as the image
+FROM scratch AS symbols
+ARG MODEL=Release
+COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/MediaServer.debug /
+
 FROM ubuntu:24.04 AS runtime
 ARG MODEL=Release
 
@@ -82,6 +88,9 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
 
 WORKDIR /opt/media/bin/
 COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/MediaServer /opt/media/ZLMediaKit/default.pem /opt/media/bin/
+# 调试符号随镜像发布，与二进制同目录，gdb 通过 debuglink 自动加载，Build ID 必然匹配
+# Ship debug symbols next to the binary; gdb loads them through the debuglink, Build ID always matches
+COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/MediaServer.debug /opt/media/bin/
 COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/config.ini /opt/media/conf/
 COPY --from=build /opt/media/ZLMediaKit/www/ /opt/media/bin/www/
 COPY --from=build /opt/media/ZLMediaKit/tools/record_zlm_resources.sh /opt/media/bin/

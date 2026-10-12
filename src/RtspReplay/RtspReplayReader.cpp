@@ -76,29 +76,41 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
         probe_index = probe_hit;
     }
 
-    const auto &probe_segment = _catalog._segments[probe_index];
-    auto probe_demuxer = std::make_shared<MP4Demuxer>();
     auto probe_open_begin = std::chrono::steady_clock::now();
-    auto probe_is_temp = isTempReplaySegment(probe_segment._file_path);
-    InfoL << "replay probe: index=" << probe_index
-          << ", temp=" << probe_is_temp
-          << ", file=" << probe_segment._file_path
-          << ", segment=" << probe_segment._begin_at_ms << "-" << probe_segment._end_at_ms
-          << ", window=" << _window_begin_at_ms << "-" << _window_end_at_ms;
-    try {
-        probe_demuxer->openMP4(probe_segment._file_path);
-    } catch (const std::exception &ex) {
-        WarnL << "replay probe failed: temp=" << probe_is_temp
-              << ", file=" << probe_segment._file_path << ", err=" << ex.what();
-        throw;
+    auto probe_tracks = [&](size_t index) -> std::vector<Track::Ptr> {
+        const auto &segment = _catalog._segments[index];
+        auto is_temp = isTempReplaySegment(segment._file_path);
+        InfoL << "replay probe: index=" << index
+              << ", temp=" << is_temp
+              << ", file=" << segment._file_path
+              << ", segment=" << segment._begin_at_ms << "-" << segment._end_at_ms
+              << ", window=" << _window_begin_at_ms << "-" << _window_end_at_ms;
+        auto demuxer = std::make_shared<MP4Demuxer>();
+        try {
+            demuxer->openMP4(segment._file_path);
+        } catch (const std::exception &ex) {
+            WarnL << "replay probe failed: temp=" << is_temp
+                  << ", file=" << segment._file_path << ", err=" << ex.what();
+            return {};
+        }
+        auto tracks = demuxer->getTracks(false);
+        if (tracks.empty()) {
+            WarnL << "replay probe found no tracks: temp=" << is_temp << ", file=" << segment._file_path;
+        }
+        return tracks;
+    };
+
+    auto tracks = probe_tracks(probe_index);
+    // 刚切出的临时文件在首个分片写完前没有 moov，退回上一个分片取 track。
+    // A freshly rotated temp file has no moov until its first fragment is written; take tracks from the previous segment.
+    if (tracks.empty() && probe_index > 0 && isTempReplaySegment(_catalog._segments[probe_index]._file_path)) {
+        tracks = probe_tracks(probe_index - 1);
     }
     _perf_stats._setup_probe_open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - probe_open_begin)
             .count();
-
-    auto tracks = probe_demuxer->getTracks(false);
     if (tracks.empty()) {
-        throw std::runtime_error("invalid replay tracks: " + probe_segment._file_path);
+        throw std::runtime_error("invalid replay tracks: " + _catalog._segments[probe_index]._file_path);
     }
 
     for (auto &track : tracks) {

@@ -100,6 +100,10 @@ private:
     uint64_t _active_segment_begin_offset_ms = 0;
     uint64_t _active_segment_end_offset_ms = 0;
     size_t _active_segment_index = 0;
+    // seek 落在最后一个分片之后（如拔盘后录像缺失），demuxer 仍停在旧位置，此时不能再按播放头追帧
+    // Seek landed past the last segment (e.g. recordings gone after a disk pull); the demuxer still sits
+    // at its old position, so the pacing loop must not catch up from it
+    bool _tail_parked = false;
 
     std::string _origin_url;
 

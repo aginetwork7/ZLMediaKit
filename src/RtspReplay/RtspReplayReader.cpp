@@ -256,6 +256,12 @@ bool RtspReplayReader::readSample() {
         return true;
     }
 
+    if (_tail_parked) {
+        // 播放头在录像之外，没有可发的帧，等待下一次 seek
+        // Playhead is beyond the recordings, nothing to send until the next seek
+        return true;
+    }
+
     bool keyFrame = false;
     bool eof = false;
     auto cur_offset = getCurrentOffset();
@@ -267,6 +273,17 @@ bool RtspReplayReader::readSample() {
             break;
         }
         _last_dts = frame->dts();
+        // demuxer 远落后于播放头时，追帧会在一个 tick 内把中间所有录像灌进 muxer（内存暴涨），改为重新定位
+        // When the demuxer lags far behind the playhead, catching up would push every recording in between
+        // into the muxer within one tick (memory blow-up); re-seek to the playhead instead
+        GET_CONFIG(uint32_t, sample_ms, Record::kSampleMS);
+        auto max_lag_ms = std::max<double>(5000, 4.0 * _speed * sample_ms);
+        if ((double)_last_dts + max_lag_ms < cur_offset) {
+            WarnL << "replay demuxer far behind playhead, resync: frame_offset_ms=" << _last_dts
+                  << ", playhead_offset_ms=" << cur_offset << ", segment_index=" << _active_segment_index;
+            seekToOffset(cur_offset);
+            break;
+        }
         if (_window_end_offset_ms > 0 && _last_dts >= _window_end_offset_ms) {
             eof = true;
             break;
@@ -501,6 +518,7 @@ void RtspReplayReader::setCurrentOffset(uint32_t offset_ms, bool sync_timeline) 
 }
 
 bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms) {
+    _tail_parked = false;
     uint64_t target_seek = offset_seek_ms;
     if (target_seek < _window_begin_offset_ms) {
         target_seek = _window_begin_offset_ms;
@@ -517,6 +535,7 @@ bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms) {
             _muxer->resetPacedSender((uint32_t)offsetToSessionNpt(target_seek));
         }
         setCurrentOffset((uint32_t)target_seek, true);
+        _tail_parked = true;
         return true;
     }
 
@@ -602,6 +621,7 @@ bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms) {
         _muxer->resetPacedSender((uint32_t)npt_seek);
     }
     setCurrentOffset((uint32_t)target_seek, true);
+    _tail_parked = true;
     return true;
 }
 

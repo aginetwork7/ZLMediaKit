@@ -27,6 +27,11 @@ using namespace toolkit;
 
 namespace mediakit {
 
+static bool isTempReplaySegment(const string &file_path) {
+    auto separator = file_path.find_last_of('/');
+    return separator != string::npos && separator + 1 < file_path.size() && file_path[separator + 1] == '.';
+}
+
 RtspReplayReader::RtspReplayReader(const MediaTuple &tuple, const RtspReplayCatalogResult &catalog, const ProtocolOption &option, toolkit::EventPoller::Ptr poller) {
     setup(tuple, catalog, option, std::move(poller));
 }
@@ -74,14 +79,26 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
     const auto &probe_segment = _catalog._segments[probe_index];
     auto probe_demuxer = std::make_shared<MP4Demuxer>();
     auto probe_open_begin = std::chrono::steady_clock::now();
-    probe_demuxer->openMP4(probe_segment._file_path);
+    auto probe_is_temp = isTempReplaySegment(probe_segment._file_path);
+    InfoL << "replay probe: index=" << probe_index
+          << ", temp=" << probe_is_temp
+          << ", file=" << probe_segment._file_path
+          << ", segment=" << probe_segment._begin_at_ms << "-" << probe_segment._end_at_ms
+          << ", window=" << _window_begin_at_ms << "-" << _window_end_at_ms;
+    try {
+        probe_demuxer->openMP4(probe_segment._file_path);
+    } catch (const std::exception &ex) {
+        WarnL << "replay probe failed: temp=" << probe_is_temp
+              << ", file=" << probe_segment._file_path << ", err=" << ex.what();
+        throw;
+    }
     _perf_stats._setup_probe_open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - probe_open_begin)
             .count();
 
     auto tracks = probe_demuxer->getTracks(false);
     if (tracks.empty()) {
-        throw std::runtime_error("invalid replay tracks");
+        throw std::runtime_error("invalid replay tracks: " + probe_segment._file_path);
     }
 
     for (auto &track : tracks) {
@@ -304,12 +321,19 @@ bool RtspReplayReader::openSegmentByIndex(size_t segment_index, uint64_t local_s
 
     const auto &segment = _catalog._segments[segment_index];
     auto demuxer = std::make_shared<MP4Demuxer>();
+    auto segment_is_temp = isTempReplaySegment(segment._file_path);
+    InfoL << "replay segment open: index=" << segment_index
+          << ", temp=" << segment_is_temp
+          << ", file=" << segment._file_path
+          << ", segment=" << segment._begin_at_ms << "-" << segment._end_at_ms
+          << ", seek_ms=" << local_seek_ms;
     try {
         demuxer->openMP4(segment._file_path);
     } catch (std::exception &ex) {
         // A corrupted/unreadable segment must not crash the timer thread; return false so the
         // caller skips it and advances to the next segment.
-        WarnL << "replay: failed to open MP4 segment: " << segment._file_path << ", err: " << ex.what();
+        WarnL << "replay: failed to open MP4 segment: temp=" << segment_is_temp
+              << ", file=" << segment._file_path << ", err=" << ex.what();
         return false;
     }
 

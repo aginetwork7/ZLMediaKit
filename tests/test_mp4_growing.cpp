@@ -422,6 +422,47 @@ int main(int argc, char *argv[]) {
     }
     cout << "fragments: stale_offset_failures=" << stale_offset_failures << " filler_failures=" << filler_failures << endl;
 
+    // 损坏的 moof/traf/trun size（声明近 2GB）配合巨大的 sample_count：不能按声明大小预分配，读到文件末尾即停止并丢弃该分片
+    // Corrupted moof/traf/trun sizes (declaring ~2GB) with a huge sample_count must not preallocate by the declared size;
+    // parsing stops at end of file and that fragment is dropped
+    size_t huge_trun_failures = 0;
+    for (auto &box : root) {
+        if (box.type != "moof") {
+            continue;
+        }
+        size_t traf_at = 0, trun_at = 0;
+        for (auto &traf : listBoxes(data, box.offset + 8, box.offset + box.size)) {
+            if (traf.type != "traf") {
+                continue;
+            }
+            for (auto &child : listBoxes(data, traf.offset + 8, traf.offset + traf.size)) {
+                if (child.type == "trun" && !trun_at) {
+                    traf_at = traf.offset;
+                    trun_at = child.offset;
+                }
+            }
+        }
+        if (!trun_at) {
+            continue;
+        }
+        saveFile(cut, data.substr(0, box.offset));
+        auto expected = readAll(cut).frames.size();
+        auto huge = data;
+        auto put32 = [&](size_t at, uint32_t v) {
+            huge[at] = (char)(v >> 24); huge[at + 1] = (char)(v >> 16); huge[at + 2] = (char)(v >> 8); huge[at + 3] = (char)v;
+        };
+        put32(box.offset, 0x7FFFFFF0);
+        put32(traf_at, 0x7FFFFFF0 - (uint32_t)(traf_at - box.offset));
+        put32(trun_at, 0x7FFFFFF0 - (uint32_t)(trun_at - box.offset));
+        put32(trun_at + 12, 0x07FFFFFF); // sample_count, ~134M entries
+        saveFile(cut, huge);
+        auto ret = readAll(cut);
+        check(truncated, "huge-trun@" + to_string(box.offset), ret, full.frames);
+        huge_trun_failures += ret.frames.size() != expected;
+        break; // one fragment is enough, each case parses the whole file tail
+    }
+    cout << "huge trun: failures=" << huge_trun_failures << endl;
+
     // 非分片 MP4（moov 在前）最后一个 mdat 的 size 为 0（延伸到文件末尾）必须能正常打开
     // A plain MP4 (moov first) whose last mdat has size 0 (runs to end of file) must still open
     size_t plain_failures = 0;
@@ -467,7 +508,7 @@ int main(int argc, char *argv[]) {
         cout << "FAIL concurrent: no partial read observed" << endl;
     }
     auto failed = concurrent.failures + truncated.failures + shrink_failures + boundary_failures + placeholder_failures
-                  + stale_offset_failures + filler_failures + plain_failures + (partial_hits ? 0 : 1);
+                  + stale_offset_failures + filler_failures + huge_trun_failures + plain_failures + (partial_hits ? 0 : 1);
     cout << (failed ? "RESULT: FAIL" : "RESULT: PASS") << endl;
     return failed ? 1 : 0;
 }

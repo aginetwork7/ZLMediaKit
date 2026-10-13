@@ -35,7 +35,7 @@ namespace mediakit {
 // on the next key frame, and attribute caching on network filesystems. Erring large merely leaves a
 // short tail on temp files stranded by an interrupted recording; erring small would misjudge a file
 // that is still recording and cut the end off the replay timeline, so this leans conservative.
-static constexpr uint64_t kTempWriteGraceMs = 30 * 1000;
+static constexpr uint64_t kTempWriteGraceMs = (uint64_t)kTempRecordWriteGraceSec * 1000;
 
 static bool isDateDir(const string &name) {
     return name.size() == 10 && name[4] == '-' && name[7] == '-';

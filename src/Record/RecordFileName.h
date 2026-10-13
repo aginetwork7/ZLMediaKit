@@ -26,6 +26,10 @@ static constexpr const char *kRecordTimeFormat = "%Y-%m-%d-%H-%M-%S";
 static constexpr size_t kRecordTimeStrLen = 19; // length of "YYYY-MM-DD-HH-MM-SS"
 static constexpr const char *kRecordFileSuffix = ".mp4";
 static constexpr size_t kRecordFileSuffixLen = 4;
+// 判断临时文件是否仍在写入的宽限期（秒），查询接口与回放目录共用，说明见 RtspReplayCatalog.cpp
+// Grace period (seconds) for deciding whether a temp file is still being written; shared by the query
+// API and the replay catalog, see RtspReplayCatalog.cpp for the rationale
+static constexpr time_t kTempRecordWriteGraceSec = 30;
 // Minimal length: <start>(19) + '_'(1) + <end>(19) + ".mp4"(4); the trailing
 // "-<index>" is producer-only and not required by the parser.
 static constexpr size_t kRecordFileNameMinLen = kRecordTimeStrLen * 2 + 1 + kRecordFileSuffixLen;

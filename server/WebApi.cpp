@@ -2020,7 +2020,20 @@ void installWebApi() {
                 if (now_sec <= start_sec) {
                     return true;
                 }
-                in_progress_names.emplace_back(makeRecordFileName(start_sec, now_sec, index_str));
+                // 终点与回放目录一致取 min(当前时间, 最后写入时间 + 宽限期)：仍在录制的文件照常延伸到当前时间，
+                // 而写入中断（如拔盘）残留的临时文件只覆盖它真正写到的位置，不会伪造一段延续至今的录像
+                // Same end as the replay catalog, min(now, last write + grace): a file still recording reaches now as
+                // before, while a temp file stranded by an interrupted write (e.g. disk pull) only covers what it holds
+                struct stat temp_stat = {};
+                if (stat(path.data(), &temp_stat) != 0) {
+                    // 刚被改成正式文件名或已删除  Just finalized into its final name, or removed
+                    return true;
+                }
+                auto end_sec = std::min<time_t>(now_sec, temp_stat.st_mtime + kTempRecordWriteGraceSec);
+                if (end_sec <= start_sec) {
+                    return true;
+                }
+                in_progress_names.emplace_back(makeRecordFileName(start_sec, end_sec, index_str));
                 return true;
             }
             if (search_mp4) {

@@ -422,6 +422,48 @@ int main(int argc, char *argv[]) {
     }
     cout << "fragments: stale_offset_failures=" << stale_offset_failures << " filler_failures=" << filler_failures << endl;
 
+    // mdat 在 moof 之前（trun data_offset 为负）是规范允许的布局，完整文件必须能读出全部帧
+    // mdat before its moof (negative trun data_offset) is a legal layout; a complete file must yield every frame
+    size_t mdat_first_failures = 0;
+    {
+        string reordered;
+        size_t pos = 0;
+        for (size_t i = 0; i < root.size(); ++i) {
+            auto &box = root[i];
+            if (box.type == "moof" && i + 1 < root.size() && root[i + 1].type == "mdat") {
+                auto &mdat = root[i + 1];
+                auto moof = data.substr(box.offset, box.size);
+                // 负载绝对位置前移 moof_size，moof 后移 mdat_size，data_offset（相对 moof）减去两者之和
+                // Payload moves back by moof_size and the moof moves forward by mdat_size, so data_offset drops by both
+                for (auto &traf : listBoxes(moof, 8, moof.size())) {
+                    if (traf.type != "traf") {
+                        continue;
+                    }
+                    for (auto &child : listBoxes(moof, traf.offset + 8, traf.offset + traf.size)) {
+                        if (child.type == "trun" && (rb32(moof, child.offset + 8) & 0x000001)) {
+                            auto at = child.offset + 16;
+                            auto v = (uint32_t)((int32_t)rb32(moof, at) - (int32_t)box.size - (int32_t)mdat.size);
+                            moof[at] = (char)(v >> 24); moof[at + 1] = (char)(v >> 16); moof[at + 2] = (char)(v >> 8); moof[at + 3] = (char)v;
+                        }
+                    }
+                }
+                reordered += data.substr(pos, box.offset - pos);
+                reordered += data.substr(mdat.offset, mdat.size);
+                reordered += moof;
+                pos = mdat.offset + mdat.size;
+                ++i;
+            }
+        }
+        reordered += data.substr(pos);
+        saveFile(cut, reordered);
+        auto ret = readAll(cut);
+        if (ret.threw || ret.bad_frame || ret.frames.size() != full.frames.size()) {
+            cout << "FAIL mdat-before-moof: threw=" << ret.threw << " bad_frame=" << ret.bad_frame << " frames=" << ret.frames.size() << "/" << full.frames.size() << endl;
+            ++mdat_first_failures;
+        }
+    }
+    cout << "mdat before moof: failures=" << mdat_first_failures << endl;
+
     // 损坏的 moof/traf/trun size（声明近 2GB）配合巨大的 sample_count：不能按声明大小预分配，读到文件末尾即停止并丢弃该分片
     // Corrupted moof/traf/trun sizes (declaring ~2GB) with a huge sample_count must not preallocate by the declared size;
     // parsing stops at end of file and that fragment is dropped
@@ -508,7 +550,7 @@ int main(int argc, char *argv[]) {
         cout << "FAIL concurrent: no partial read observed" << endl;
     }
     auto failed = concurrent.failures + truncated.failures + shrink_failures + boundary_failures + placeholder_failures
-                  + stale_offset_failures + filler_failures + huge_trun_failures + plain_failures + (partial_hits ? 0 : 1);
+                  + stale_offset_failures + filler_failures + mdat_first_failures + huge_trun_failures + plain_failures + (partial_hits ? 0 : 1);
     cout << (failed ? "RESULT: FAIL" : "RESULT: PASS") << endl;
     return failed ? 1 : 0;
 }

@@ -268,6 +268,9 @@ extern const std::string kBroadcastPlayerCountChanged;
 // 绑定的本地网卡ip  [AUTO-TRANSLATED:daa90832]
 // Bound local network card ip
 extern const std::string kListenIP;
+// 周期性调用 malloc_trim 把 glibc 各线程分配池里的空闲内存归还给系统，单位秒，0 关闭（仅 Linux glibc 生效）
+// Periodically call malloc_trim to return free memory held in glibc arenas to the OS, in seconds, 0 disables (Linux glibc only)
+extern const std::string kMallocTrimSec;
 } // namespace General
 
 namespace Protocol {

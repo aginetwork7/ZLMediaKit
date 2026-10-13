@@ -13,6 +13,7 @@
 #include "RtspReplayReader.h"
 
 #include "Common/config.h"
+#include "Record/RecordFileName.h"
 #include "Extension/Frame.h"
 #include "Thread/WorkThreadPool.h"
 #include "Util/logger.h"
@@ -27,9 +28,13 @@ using namespace toolkit;
 
 namespace mediakit {
 
+// 临时文件命名规则由 MP4Recorder::createFile 决定，统一用 RecordFileName.h 判断，setup() 的 probe 回退依赖它
+// The temp naming rule belongs to MP4Recorder::createFile; reuse RecordFileName.h, the probe fallback in setup() depends on it
 static bool isTempReplaySegment(const string &file_path) {
     auto separator = file_path.find_last_of('/');
-    return separator != string::npos && separator + 1 < file_path.size() && file_path[separator + 1] == '.';
+    auto name = separator == string::npos ? file_path : file_path.substr(separator + 1);
+    time_t start_sec = 0;
+    return parseTempRecordFileName(name, start_sec);
 }
 
 RtspReplayReader::RtspReplayReader(const MediaTuple &tuple, const RtspReplayCatalogResult &catalog, const ProtocolOption &option, toolkit::EventPoller::Ptr poller) {
@@ -103,14 +108,17 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
     auto tracks = probe_tracks(probe_index);
     // 刚切出的临时文件在首个分片写完前没有 moov，退回上一个分片取 track。
     // A freshly rotated temp file has no moov until its first fragment is written; take tracks from the previous segment.
-    if (tracks.empty() && probe_index > 0 && isTempReplaySegment(_catalog._segments[probe_index]._file_path)) {
+    auto fallback_tried = tracks.empty() && probe_index > 0 && isTempReplaySegment(_catalog._segments[probe_index]._file_path);
+    if (fallback_tried) {
         tracks = probe_tracks(probe_index - 1);
     }
     _perf_stats._setup_probe_open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - probe_open_begin)
             .count();
     if (tracks.empty()) {
-        throw std::runtime_error("invalid replay tracks: " + _catalog._segments[probe_index]._file_path);
+        throw std::runtime_error("invalid replay tracks: " + _catalog._segments[probe_index]._file_path
+                                 + (fallback_tried ? ", fallback=" + _catalog._segments[probe_index - 1]._file_path : std::string())
+                                 + " (see replay probe warnings for per-file cause)");
     }
 
     for (auto &track : tracks) {
@@ -257,8 +265,8 @@ bool RtspReplayReader::readSample() {
     }
 
     if (_tail_parked) {
-        // 播放头在录像之外，没有可发的帧，等待下一次 seek
-        // Playhead is beyond the recordings, nothing to send until the next seek
+        // 目标处及之后没有可播帧，等待下一次 seek（会话无人观看时由 MediaSource 自动关闭）
+        // No playable frame at or after the target; wait for the next seek (the session is closed by MediaSource once nobody watches)
         return true;
     }
 
@@ -280,8 +288,14 @@ bool RtspReplayReader::readSample() {
     auto cur_offset = getCurrentOffset();
     while (!eof && _last_dts < cur_offset) {
         if (tick_frames >= kMaxFramesPerTick || tick_ticker.elapsedTime() > kMaxTickMs) {
-            WarnL << "replay read budget exhausted this tick: frames=" << tick_frames << ", elapsed_ms=" << tick_ticker.elapsedTime()
-                  << ", frame_offset_ms=" << _last_dts << ", playhead_offset_ms=" << cur_offset << ", segment_index=" << _active_segment_index;
+            // 磁盘慢或高倍速时可能每个 tick 都触发，限频到每会话 10 秒一条
+            // May trigger every tick on a slow disk or at high speed; rate-limit to one line per session every 10s
+            if (!_budget_warned || _budget_warn_ticker.elapsedTime() > 10 * 1000) {
+                _budget_warned = true;
+                _budget_warn_ticker.resetTime();
+                WarnL << "replay read budget exhausted this tick: frames=" << tick_frames << ", elapsed_ms=" << tick_ticker.elapsedTime()
+                      << ", frame_offset_ms=" << _last_dts << ", playhead_offset_ms=" << cur_offset << ", segment_index=" << _active_segment_index;
+            }
             break;
         }
         auto frame = readFrameWithSegmentSwitch(keyFrame, eof);
@@ -305,8 +319,25 @@ bool RtspReplayReader::readSample() {
         // demuxer 远落后于播放头时，追帧会在一个 tick 内把中间所有录像灌进 muxer（内存暴涨），改为重新定位
         // When the demuxer lags far behind the playhead, catching up would push every recording in between
         // into the muxer within one tick (memory blow-up); re-seek to the playhead instead
+        // 阈值 = max(下限, 若干个定时周期内按当前倍速应推进的播放时长)：
+        // - sample_ms 是回放定时器周期（start() 中 Timer(sampleMS)），每个 tick 播放头推进 speed * sample_ms；
+        //   允许积压 4 个 tick，读帧预算（kMaxFramesPerTick/kMaxTickMs）把某个 tick 截断留下的积压会在后续 tick 追上，不触发重定位；
+        //   若读取持续跟不上（磁盘慢、超高码率倍速），积压超过阈值后跳到播放头，以丢帧换取不灌帧。
+        // - 下限 5000ms 大于常见 GOP（2~4s）：seek 定位到目标之前的关键帧时，起播位置本就落后播放头最多一个 GOP，不应误判。
+        // 这两个值是按上述约束选取的经验值，没有设备上的精确标定；调大会重新引入一次性灌帧，调小（低于 GOP 或预算积压）会频繁重定位。
+        // Threshold = max(floor, playback a few timer ticks advance at the current speed):
+        // - sample_ms is the replay timer period (Timer(sampleMS) in start()); the playhead advances speed * sample_ms per tick.
+        //   A 4-tick backlog is tolerated, so a tick cut short by the read budget (kMaxFramesPerTick/kMaxTickMs) catches up on
+        //   the next ticks without a re-seek; if reading keeps falling behind (slow disk, very high bitrate * speed), the backlog
+        //   exceeds the threshold and we jump to the playhead, trading dropped frames for no burst.
+        // - The 5000ms floor exceeds a typical GOP (2-4s): a seek starts from the key frame before the target, up to one GOP
+        //   behind the playhead, which must not count as lag.
+        // Both values are chosen from these constraints, not calibrated on a device. Raising them brings back the burst;
+        // lowering them below a GOP or the budget backlog causes repeated re-seeks.
+        static constexpr double kMinResyncLagMs = 5000;
+        static constexpr double kResyncLagTicks = 4.0;
         GET_CONFIG(uint32_t, sample_ms, Record::kSampleMS);
-        auto max_lag_ms = std::max<double>(5000, 4.0 * _speed * sample_ms);
+        auto max_lag_ms = std::max<double>(kMinResyncLagMs, kResyncLagTicks * _speed * sample_ms);
         if ((double)_last_dts + max_lag_ms < cur_offset) {
             WarnL << "replay demuxer far behind playhead, resync: frame_offset_ms=" << _last_dts
                   << ", playhead_offset_ms=" << cur_offset << ", segment_index=" << _active_segment_index;
@@ -560,12 +591,7 @@ bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms) {
     auto target_segment_index = locateSegmentByAbsolute(target_abs_ms);
     if (target_segment_index >= _catalog._segments.size()) {
         WarnL << "replay seek beyond last segment, tail fallback, target_abs_ms=" << target_abs_ms;
-        if (_muxer && _started) {
-            _muxer->resetPacedSender((uint32_t)offsetToSessionNpt(target_seek));
-        }
-        setCurrentOffset((uint32_t)target_seek, true);
-        _tail_parked = true;
-        return true;
+        return parkPlayhead(target_seek);
     }
 
     const auto &target_segment = _catalog._segments[target_segment_index];
@@ -645,9 +671,15 @@ bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms) {
     }
 
     WarnL << "replay seek fallback without playable frame, target_abs_ms=" << target_abs_ms;
+    return parkPlayhead(target_seek);
+}
+
+bool RtspReplayReader::parkPlayhead(uint64_t target_seek) {
+    // 播放头移到目标，但 demuxer 留在旧位置，必须同时置 _tail_parked，否则节拍循环会从旧位置一路追到播放头
+    // The playhead moves to the target while the demuxer stays put; _tail_parked must be set together,
+    // otherwise the pacing loop catches up from the old position all the way to the playhead
     if (_muxer && _started) {
-        auto npt_seek = offsetToSessionNpt(target_seek);
-        _muxer->resetPacedSender((uint32_t)npt_seek);
+        _muxer->resetPacedSender((uint32_t)offsetToSessionNpt(target_seek));
     }
     setCurrentOffset((uint32_t)target_seek, true);
     _tail_parked = true;

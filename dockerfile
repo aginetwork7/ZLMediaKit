@@ -44,6 +44,8 @@ WORKDIR /opt/media/ZLMediaKit
 RUN mkdir -p build release/linux/${MODEL}/
 
 WORKDIR /opt/media/ZLMediaKit/build
+# 只有 Release 且开启 objcopy 时才会生成 MediaServer.debug，其他构建类型放一个空文件，保证后面的 COPY 不失败
+# MediaServer.debug is only produced for Release with objcopy; create an empty one otherwise so the COPY steps below work
 RUN --mount=type=cache,target=/root/.cache/ccache \
         ccache -M 2G && \
         cmake -G Ninja \
@@ -56,7 +58,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             .. && \
-        cmake --build . --parallel $(nproc)
+        cmake --build . --parallel $(nproc) && \
+        touch -a /opt/media/ZLMediaKit/release/linux/${MODEL}/MediaServer.debug
 
 # 导出与镜像同一次编译产出的调试符号：docker build --target symbols --output type=local,dest=./symbols .
 # Export debug symbols from the same build as the image

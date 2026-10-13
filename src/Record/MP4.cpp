@@ -62,8 +62,9 @@ MP4FileIO::Reader MP4FileIO::createReader(){
     // 保存自己的强引用，防止提前释放  [AUTO-TRANSLATED:e8e14f60]
     // Save a strong reference to itself to prevent premature release
     mov_reader_t *raw = nullptr;
+    int create_ret = 0;
     try {
-        mov_reader_create2(&s_io, this, &raw);
+        create_ret = mov_reader_create2(&s_io, this, &raw);
     } catch (...) {
         // libmov 的 assert 会抛异常，此时 reader 已解析一半，需在这里释放
         // libmov assert() throws here; the half-parsed reader must be released by us
@@ -78,7 +79,7 @@ MP4FileIO::Reader MP4FileIO::createReader(){
         }
     });
     if(!reader){
-        throw std::runtime_error("读取mp4文件失败!");
+        throw std::runtime_error("读取mp4文件失败! err=" + std::to_string(create_ret));
     }
     return reader;
 }
@@ -134,14 +135,26 @@ void MP4FileDisk::closeFile() {
 // ferror() is positive while libmov's read API uses 1 for "got a sample"; io errors must be negative,
 // otherwise EIO after a disk pull looks like success and the same sample is read forever
 int MP4FileDisk::onRead(void *data, size_t bytes) {
+    errno = 0;
     if (bytes == fread(data, 1, bytes, _file.get())){
         return 0;
     }
-    return 0 != ferror(_file.get()) ? -EIO : -1 /*EOF*/;
+    if (0 == ferror(_file.get())) {
+        return -1; /*EOF*/
+    }
+    // 保留 errno 便于区分拔盘(EIO/ENODEV)等原因，取不到时退回 -EIO
+    // Keep errno so a pulled disk (EIO/ENODEV) etc. can be told apart; fall back to -EIO
+    return errno > 0 ? -errno : -EIO;
 }
 
 int MP4FileDisk::onWrite(const void *data, size_t bytes) {
-    return bytes == fwrite(data, 1, bytes, _file.get()) ? 0 : -EIO;
+    errno = 0;
+    if (bytes == fwrite(data, 1, bytes, _file.get())) {
+        return 0;
+    }
+    // 区分磁盘满(ENOSPC)、只读重挂载(EROFS)、设备移除(ENODEV)等，取不到时退回 -EIO
+    // Tell disk full (ENOSPC), read-only remount (EROFS), device gone (ENODEV) apart; fall back to -EIO
+    return errno > 0 ? -errno : -EIO;
 }
 
 int MP4FileDisk::onSeek(uint64_t offset) {

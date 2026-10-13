@@ -68,6 +68,7 @@ private:
     uint32_t getCurrentOffset() const;
     void setCurrentOffset(uint32_t offset_ms, bool sync_timeline);
     bool seekToOffset(uint32_t offset_seek_ms);
+    bool parkPlayhead(uint64_t target_seek);
 
     uint32_t absoluteToOffset(uint64_t abs_ms) const;
     uint64_t offsetToAbsolute(uint32_t offset_ms) const;
@@ -100,9 +101,11 @@ private:
     uint64_t _active_segment_begin_offset_ms = 0;
     uint64_t _active_segment_end_offset_ms = 0;
     size_t _active_segment_index = 0;
-    // seek 落在最后一个分片之后（如拔盘后录像缺失），demuxer 仍停在旧位置，此时不能再按播放头追帧
-    // Seek landed past the last segment (e.g. recordings gone after a disk pull); the demuxer still sits
-    // at its old position, so the pacing loop must not catch up from it
+    // seek 在目标处及之后找不到可播帧（落在最后一个分片之后，或之后的分片全部不可读，如拔盘后），
+    // demuxer 仍停在旧位置，下一次 seek 之前节拍循环不能从这里追帧
+    // Seek found no playable frame at or after the target (past the last segment, or every remaining segment
+    // unreadable, e.g. after a disk pull); the demuxer still sits at its old position, so the pacing loop must
+    // not catch up from it until the next seek
     bool _tail_parked = false;
 
     std::string _origin_url;
@@ -111,6 +114,8 @@ private:
 
     std::recursive_mutex _mtx;
     toolkit::Ticker _seek_ticker;
+    toolkit::Ticker _budget_warn_ticker;
+    bool _budget_warned = false;
     toolkit::Timer::Ptr _timer;
 
     MP4Demuxer::Ptr _demuxer;

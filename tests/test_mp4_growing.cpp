@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2016-present The ZLMediaKit project authors. All Rights Reserved.
  *
  * This file is part of ZLMediaKit(https://github.com/ZLMediaKit/ZLMediaKit).
@@ -47,7 +47,7 @@ struct FrameKey {
 };
 
 struct ReadResult {
-    bool opened = false;
+    bool has_tracks = false;
     bool threw = false;
     bool bad_frame = false;
     string error;
@@ -72,7 +72,7 @@ ReadResult readAll(const string &path) {
         ret.error = ex.what();
         return ret;
     }
-    ret.opened = !demuxer.getTracks(false).empty();
+    ret.has_tracks = !demuxer.getTracks(false).empty();
     for (;;) {
         bool key = false, eof = false;
         auto frame = demuxer.readFrame(key, eof);
@@ -141,7 +141,7 @@ struct Stats {
 
 void check(Stats &stats, const string &what, const ReadResult &ret, const vector<FrameKey> &full) {
     ++stats.opens;
-    if (!ret.opened && !ret.threw) {
+    if (!ret.has_tracks && !ret.threw) {
         ++stats.not_ready;
     }
     // 尚无完整 moov 时打开失败属于"未就绪"，只有 assert 异常算失败
@@ -205,7 +205,7 @@ int main(int argc, char *argv[]) {
         muxer->addTrackCompleted();
 
         std::thread reader([&]() {
-            while (!done && !getenv("MP4_TEST_FULL_ONLY")) {
+            while (!done) {
                 partial_reads.push_back(readAll(growing));
             }
         });
@@ -233,15 +233,11 @@ int main(int argc, char *argv[]) {
             }
         }
         cout << "complete file: frames=" << full.frames.size() << " dts_backwards=" << backwards << endl;
-        if (backwards && !getenv("MP4_TEST_ALLOW_DUP")) {
+        if (backwards) {
             cout << "RESULT: FAIL" << endl;
             return 1;
         }
     }
-    if (getenv("MP4_TEST_FULL_ONLY")) {
-        return 0;
-    }
-
     // 解析中途触发 libmov assert（tkhd version 改成 2）时 reader 不能泄漏，需配合 leaks/LSan 检查
     // A libmov assert thrown mid-parse (tkhd version set to 2) must not leak the reader; check with leaks/LSan
     {
@@ -268,8 +264,10 @@ int main(int argc, char *argv[]) {
             asserted += ret.threw && ret.error.find("Assertion failed") != string::npos;
         }
         cout << "assert during parse: opens=" << opens << " asserted=" << asserted << endl;
-        if (getenv("MP4_TEST_ASSERT_ONLY")) {
-            return 0;
+        if (asserted != opens) {
+            cout << "FAIL: corrupted tkhd did not trigger the assert path" << endl;
+            cout << "RESULT: FAIL" << endl;
+            return 1;
         }
     }
     size_t max_seen = 0;

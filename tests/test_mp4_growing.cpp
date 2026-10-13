@@ -372,12 +372,102 @@ int main(int argc, char *argv[]) {
          << " shrink_failures=" << shrink_failures << " boundary_failures=" << boundary_failures
          << " placeholder_failures=" << placeholder_failures << endl;
 
+    // 写端第一遍写 moof 时 trun data_offset 为 0，之后才重写；读到旧值的分片必须被丢弃
+    // The writer's first pass writes trun data_offset = 0 and rewrites it later; a fragment read with the stale value must be dropped
+    // 规范允许 moof 与 mdat 之间有 free/skip/uuid，不能因此截断文件
+    // free/skip/uuid between a moof and its mdat are legal and must not truncate the file
+    size_t stale_offset_failures = 0, filler_failures = 0;
+    for (auto &box : root) {
+        if (box.type != "moof") {
+            continue;
+        }
+        vector<size_t> data_offset_fields;
+        for (auto &traf : listBoxes(data, box.offset + 8, box.offset + box.size)) {
+            if (traf.type != "traf") {
+                continue;
+            }
+            for (auto &child : listBoxes(data, traf.offset + 8, traf.offset + traf.size)) {
+                if (child.type == "trun" && (rb32(data, child.offset + 8) & 0x000001)) {
+                    data_offset_fields.push_back(child.offset + 16);
+                }
+            }
+        }
+        if (data_offset_fields.empty()) {
+            continue;
+        }
+        saveFile(cut, data.substr(0, box.offset));
+        auto expected = readAll(cut).frames.size();
+
+        auto stale = data;
+        for (auto field : data_offset_fields) {
+            memset(&stale[field], 0, 4);
+        }
+        saveFile(cut, stale);
+        auto ret = readAll(cut);
+        check(truncated, "stale-data-offset@" + to_string(box.offset), ret, full.frames);
+        stale_offset_failures += ret.frames.size() != expected;
+
+        // 在 moof 后插入 8 字节 free，并把该分片的 data_offset（相对 moof）加 8
+        // Insert an 8-byte free box after the moof and add 8 to that fragment's moof-relative data_offset
+        auto filler = data;
+        for (auto field : data_offset_fields) {
+            auto v = rb32(filler, field) + 8;
+            filler[field] = (char)(v >> 24); filler[field + 1] = (char)(v >> 16); filler[field + 2] = (char)(v >> 8); filler[field + 3] = (char)v;
+        }
+        filler.insert(box.offset + box.size, string("\x00\x00\x00\x08" "free", 8));
+        saveFile(cut, filler);
+        ret = readAll(cut);
+        check(truncated, "filler@" + to_string(box.offset), ret, full.frames);
+        filler_failures += ret.frames.size() != full.frames.size();
+    }
+    cout << "fragments: stale_offset_failures=" << stale_offset_failures << " filler_failures=" << filler_failures << endl;
+
+    // 非分片 MP4（moov 在前）最后一个 mdat 的 size 为 0（延伸到文件末尾）必须能正常打开
+    // A plain MP4 (moov first) whose last mdat has size 0 (runs to end of file) must still open
+    size_t plain_failures = 0;
+    {
+        mINI::Instance()[Record::kEnableFmp4] = 0;
+        mINI::Instance()[Record::kFastStart] = 1;
+        NOTICE_EMIT(BroadcastReloadConfigArgs, Broadcast::kBroadcastReloadConfig);
+        auto muxer = std::make_shared<MP4Muxer>();
+        muxer->openMP4(cut);
+        for (auto &track : tracks) {
+            muxer->addTrack(track);
+        }
+        muxer->addTrackCompleted();
+        for (auto &frame : input) {
+            muxer->inputFrame(frame);
+        }
+        muxer->closeMP4();
+        auto plain = loadFile(cut);
+        auto expected = readAll(cut);
+        auto boxes = listBoxes(plain, 0, plain.size());
+        auto mdat = std::find_if(boxes.begin(), boxes.end(), [](const Box &b) { return b.type == "mdat"; });
+        if (mdat == boxes.end() || expected.frames.empty()) {
+            cout << "FAIL plain mp4 layout" << endl;
+            ++plain_failures;
+        } else {
+            // 去掉 mdat 之后的 box，使 mdat 成为最后一个 box 再把 size 置 0
+            // Drop the boxes after the mdat so it is the last one, then zero its size
+            plain.resize(mdat->offset + mdat->size);
+            memset(&plain[mdat->offset], 0, 4);
+            saveFile(cut, plain);
+            auto ret = readAll(cut);
+            if (ret.threw || ret.bad_frame || ret.frames.size() != expected.frames.size()) {
+                cout << "FAIL plain mp4 with size-0 mdat: threw=" << ret.threw << " frames=" << ret.frames.size() << "/" << expected.frames.size() << endl;
+                ++plain_failures;
+            }
+        }
+    }
+    cout << "plain mp4: failures=" << plain_failures << endl;
+
     // 边写边读必须真的读到过"部分完成"的文件，否则这一段等于没测
     // Read-while-write must actually observe a partially written file, otherwise that section tested nothing
     if (!partial_hits) {
         cout << "FAIL concurrent: no partial read observed" << endl;
     }
-    auto failed = concurrent.failures + truncated.failures + shrink_failures + boundary_failures + placeholder_failures + (partial_hits ? 0 : 1);
+    auto failed = concurrent.failures + truncated.failures + shrink_failures + boundary_failures + placeholder_failures
+                  + stale_offset_failures + filler_failures + plain_failures + (partial_hits ? 0 : 1);
     cout << (failed ? "RESULT: FAIL" : "RESULT: PASS") << endl;
     return failed ? 1 : 0;
 }

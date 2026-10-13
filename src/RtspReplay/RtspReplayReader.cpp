@@ -262,14 +262,43 @@ bool RtspReplayReader::readSample() {
         return true;
     }
 
+    // 单个 tick 的读帧上限：超过即让出线程，保证 close/seek 能拿到锁，异常的 demuxer 也不会无限灌帧
+    // Per-tick read budget: yield once exceeded so close/seek can take the lock and a misbehaving
+    // demuxer can never push frames without bound
+    static constexpr size_t kMaxFramesPerTick = 2048;
+    static constexpr uint64_t kMaxTickMs = 200;
+    // dts 连续不前进的帧数上限（同一时刻的多个 NAL/音视频交错远小于此），超过视为 demuxer 卡死
+    // Max consecutive frames whose dts does not advance (NALs sharing a timestamp or A/V interleave
+    // stay far below this); beyond it the demuxer is considered stuck
+    static constexpr size_t kMaxStalledFrames = 64;
+    toolkit::Ticker tick_ticker;
+    size_t tick_frames = 0;
+    size_t stalled_frames = 0;
+
     bool keyFrame = false;
     bool eof = false;
     auto cur_offset = getCurrentOffset();
     while (!eof && _last_dts < cur_offset) {
+        if (tick_frames >= kMaxFramesPerTick || tick_ticker.elapsedTime() > kMaxTickMs) {
+            WarnL << "replay read budget exhausted this tick: frames=" << tick_frames << ", elapsed_ms=" << tick_ticker.elapsedTime()
+                  << ", frame_offset_ms=" << _last_dts << ", playhead_offset_ms=" << cur_offset << ", segment_index=" << _active_segment_index;
+            break;
+        }
         auto frame = readFrameWithSegmentSwitch(keyFrame, eof);
         if (!frame) {
             // No frame available this tick (transient demuxer miss or eof). Position has not
             // advanced, so re-looping would spin on _mtx; bail out and retry next timer tick.
+            break;
+        }
+        ++tick_frames;
+        stalled_frames = frame->dts() <= _last_dts ? stalled_frames + 1 : 0;
+        if (stalled_frames > kMaxStalledFrames) {
+            ErrorL << "replay demuxer stuck, stop session: frame_dts=" << frame->dts() << ", pts=" << frame->pts()
+                   << ", size=" << frame->size() << ", track=" << frame->getTrackTypeStr() << ", playhead_offset_ms=" << cur_offset
+                   << ", segment_index=" << _active_segment_index
+                   << ", file=" << (_active_segment_index < _catalog._segments.size() ? _catalog._segments[_active_segment_index]._file_path : "");
+            _demuxer = nullptr;
+            eof = true;
             break;
         }
         _last_dts = frame->dts();

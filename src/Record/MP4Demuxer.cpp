@@ -45,7 +45,6 @@ void MP4Demuxer::openMP4(const string &file) {
     closeMP4();
 
     _file_path = file;
-    _warned_large_sample = false;
     _mp4_file = std::make_shared<MP4FileDisk>();
     _mp4_file->openFile(file.data(), "rb+");
     _mov_reader = _mp4_file->createReader();
@@ -129,14 +128,6 @@ Frame::Ptr MP4Demuxer::readFrame(bool &keyFrame, bool &eof) {
         ctx->dts = dts;
         ctx->flags = flags;
         ctx->track_id = track_id;
-
-        static constexpr size_t kLargeSampleBytes = 4 * 1024 * 1024;
-        if (bytes >= kLargeSampleBytes && !ctx->thiz->_warned_large_sample) {
-            ctx->thiz->_warned_large_sample = true;
-            WarnL << "mp4 demux large sample: file=" << ctx->thiz->_file_path
-                  << ", track=" << track_id << ", bytes=" << bytes
-                  << ", dts=" << dts << ", pts=" << pts;
-        }
 
         // 损坏文件中的 sample 大小可能是几百 MB 甚至 GB，超过上限按读失败处理（libmov 返回 -ENOMEM），避免超大分配常驻缓冲池
         // A corrupted sample table can claim hundreds of MB or more; above the cap treat it as a read failure

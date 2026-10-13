@@ -298,7 +298,19 @@ bool RtspReplayReader::readSample() {
             }
             break;
         }
-        auto frame = readFrameWithSegmentSwitch(keyFrame, eof);
+        Frame::Ptr frame;
+        try {
+            frame = readFrameWithSegmentSwitch(keyFrame, eof);
+        } catch (const std::exception &ex) {
+            // libmov 在读帧时按需解析后续分片，损坏数据触发的 assert 会抛异常；Timer 会吞掉异常并在下个 tick 重读同一处，
+            // 会话既不前进也不结束，这里直接结束会话
+            // libmov parses later fragments lazily while reading, so corrupted data can throw from an assert; the Timer
+            // would swallow it and retry the same spot every tick, so the session neither advances nor ends; stop it here
+            ErrorL << "replay demux exception, stop session: segment_index=" << _active_segment_index << ", err=" << ex.what();
+            _demuxer = nullptr;
+            eof = true;
+            break;
+        }
         if (!frame) {
             // No frame available this tick (transient demuxer miss or eof). Position has not
             // advanced, so re-looping would spin on _mtx; bail out and retry next timer tick.

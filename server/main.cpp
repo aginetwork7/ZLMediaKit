@@ -258,22 +258,27 @@ static uint64_t readRssAnonKB() {
 // bursts such as replay; trim the whole process periodically
 static void startMallocTrimTimer() {
 #if defined(__linux__) && defined(__GLIBC__)
-    // 首次也按配置的间隔执行（启动后半小时），关闭时每分钟检查一次配置
-    // The first run also waits a full interval; when disabled, re-check the config every minute
+    // 关闭时每分钟检查一次配置是否被重新打开  Disabled: re-check the config every minute
+    static constexpr uint64_t kDisabledRecheckMS = 60 * 1000;
+    // 释放超过 16MB 或耗时超过 50ms 时打日志  Log when more than 16MB is released or the trim takes over 50ms
+    static constexpr uint64_t kLogReleasedKB = 16 * 1024;
+    static constexpr uint64_t kLogCostMS = 50;
+    // 首次也按配置的间隔执行（启动后半小时）  The first run also waits a full interval
     GET_CONFIG(uint32_t, first_trim_sec, General::kMallocTrimSec);
-    WorkThreadPool::Instance().getPoller()->doDelayTask((first_trim_sec ? first_trim_sec : 60) * 1000ULL, []() -> uint64_t {
+    auto first_delay_ms = first_trim_sec ? first_trim_sec * 1000ULL : kDisabledRecheckMS;
+    WorkThreadPool::Instance().getPoller()->doDelayTask(first_delay_ms, []() -> uint64_t {
         GET_CONFIG(uint32_t, trim_sec, General::kMallocTrimSec);
         if (!trim_sec) {
-            // 关闭时每分钟检查一次配置是否被重新打开  Disabled: re-check the config every minute
-            return 60 * 1000;
+            return kDisabledRecheckMS;
         }
         auto before_kb = readRssAnonKB();
         Ticker ticker;
         malloc_trim(0);
+        auto cost_ms = ticker.elapsedTime();
         auto after_kb = readRssAnonKB();
-        if (before_kb > after_kb + 16 * 1024) {
-            InfoL << "malloc_trim released " << (before_kb - after_kb) / 1024 << "MB, rss_anon " << before_kb / 1024 << "MB -> "
-                  << after_kb / 1024 << "MB, cost " << ticker.elapsedTime() << "ms";
+        if (before_kb > after_kb + kLogReleasedKB || cost_ms > kLogCostMS) {
+            InfoL << "malloc_trim released " << (before_kb > after_kb ? before_kb - after_kb : 0) / 1024 << "MB, rss_anon "
+                  << before_kb / 1024 << "MB -> " << after_kb / 1024 << "MB, cost " << cost_ms << "ms";
         }
         return trim_sec * 1000ULL;
     });

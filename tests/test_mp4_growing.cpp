@@ -173,6 +173,12 @@ int main(int argc, char *argv[]) {
     size_t max_frames = argc > 3 ? atoi(argv[3]) : 450;
     string growing = work_dir + "/.growing.mp4";
     string cut = work_dir + "/cut.mp4";
+    // 退出时（包括提前返回）删除临时文件  Remove the work files on every exit path
+    struct Cleanup {
+        string a, b;
+        ~Cleanup() { remove(a.data()); remove(b.data()); }
+    } cleanup { growing, cut };
+    remove(growing.data());
 
     mINI::Instance()[Record::kEnableFmp4] = 1;
     mINI::Instance()[Record::kFastStart] = 0;
@@ -271,12 +277,14 @@ int main(int argc, char *argv[]) {
         }
     }
     size_t max_seen = 0;
+    size_t partial_hits = 0;
     for (auto &ret : partial_reads) {
         check(concurrent, "concurrent", ret, full.frames);
         max_seen = std::max(max_seen, ret.frames.size());
+        partial_hits += !ret.frames.empty() && ret.frames.size() < full.frames.size();
     }
     cout << "concurrent: opens=" << concurrent.opens << " not_ready=" << concurrent.not_ready
-         << " failures=" << concurrent.failures << " max_frames_seen=" << max_seen << "/" << full.frames.size() << endl;
+         << " failures=" << concurrent.failures << " partial_reads=" << partial_hits << " max_frames_seen=" << max_seen << "/" << full.frames.size() << endl;
 
     // 2. 截断与占位 size  Truncation and placeholder sizes
     Stats truncated;
@@ -364,7 +372,12 @@ int main(int argc, char *argv[]) {
          << " shrink_failures=" << shrink_failures << " boundary_failures=" << boundary_failures
          << " placeholder_failures=" << placeholder_failures << endl;
 
-    auto failed = concurrent.failures + truncated.failures + shrink_failures + boundary_failures + placeholder_failures;
+    // 边写边读必须真的读到过"部分完成"的文件，否则这一段等于没测
+    // Read-while-write must actually observe a partially written file, otherwise that section tested nothing
+    if (!partial_hits) {
+        cout << "FAIL concurrent: no partial read observed" << endl;
+    }
+    auto failed = concurrent.failures + truncated.failures + shrink_failures + boundary_failures + placeholder_failures + (partial_hits ? 0 : 1);
     cout << (failed ? "RESULT: FAIL" : "RESULT: PASS") << endl;
     return failed ? 1 : 0;
 }

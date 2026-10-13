@@ -11,6 +11,7 @@
 #if defined(ENABLE_MP4)
 
 #include "MP4.h"
+#include <cerrno>
 #include "Util/File.h"
 #include "Util/logger.h"
 #include "Common/config.h"
@@ -128,15 +129,19 @@ void MP4FileDisk::closeFile() {
     _file = nullptr;
 }
 
+// ferror() 返回正数，而 libmov 读帧接口用 1 表示"读到一帧"，io 错误必须用负数返回，
+// 否则拔盘后的 EIO 会被当成读帧成功，读位置不前进，同一帧被无限重复读出
+// ferror() is positive while libmov's read API uses 1 for "got a sample"; io errors must be negative,
+// otherwise EIO after a disk pull looks like success and the same sample is read forever
 int MP4FileDisk::onRead(void *data, size_t bytes) {
     if (bytes == fread(data, 1, bytes, _file.get())){
         return 0;
     }
-    return 0 != ferror(_file.get()) ? ferror(_file.get()) : -1 /*EOF*/;
+    return 0 != ferror(_file.get()) ? -EIO : -1 /*EOF*/;
 }
 
 int MP4FileDisk::onWrite(const void *data, size_t bytes) {
-    return bytes == fwrite(data, 1, bytes, _file.get()) ? 0 : ferror(_file.get());
+    return bytes == fwrite(data, 1, bytes, _file.get()) ? 0 : -EIO;
 }
 
 int MP4FileDisk::onSeek(uint64_t offset) {

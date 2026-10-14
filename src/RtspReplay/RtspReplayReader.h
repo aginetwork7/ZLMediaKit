@@ -63,13 +63,15 @@ private:
     bool openSegmentByOffset(uint32_t target_offset_ms);
     bool openSegmentByIndex(size_t segment_index, uint64_t local_seek_ms);
     size_t locateSegmentByAbsolute(uint64_t abs_ms) const;
-    // Read the next frame from the active segment and remap its timestamps to the replay timeline.
+    // Read the next frame from the active segment and convert its segment-local stamps to the global
+    // replay offset timebase (same space as getCurrentOffset()); frames before the window begin are skipped.
+    // The result is NOT session NPT: callers must still apply remapFrameToSessionNpt() before muxing.
     // When the active segment reaches EOF, automatically opens the next playable segment and continues.
     // A null result with eof=false means the demuxer produced no frame yet; eof=true means the replay
     // window or all available segments have been exhausted.
     // @param keyFrame Set to true when the returned frame is a key frame.
     // @param eof Set to true when no further frame can be read from the replay window.
-    // @return The next timestamp-remapped frame, or nullptr as described above.
+    // @return The next frame in the global offset timebase, or nullptr as described above.
     Frame::Ptr readFrameWithSegmentSwitch(bool &keyFrame, bool &eof);
 
     uint32_t getCurrentOffset() const;
@@ -89,7 +91,7 @@ private:
     // Resolve a session NPT to an absolute playback timestamp.
     // NPT 0 is the beginning of this replay session's requested time window, not the MP4 file start.
     // Before the session starts, all NPTs resolve to the window beginning; values past the window end
-    // resolve to the window end.
+    // resolve to the last millisecond inside the window (end - 1), since the window end is exclusive.
     // @param npt_ms Elapsed milliseconds since the replay window began.
     // @return Absolute Unix timestamp in milliseconds within the replay window.
     uint64_t resolvePlayTargetFromNpt(uint32_t npt_ms) const;

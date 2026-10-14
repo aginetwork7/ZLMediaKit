@@ -107,6 +107,10 @@ private:
     // unreadable, e.g. after a disk pull); the demuxer still sits at its old position, so the pacing loop must
     // not catch up from it until the next seek
     bool _tail_parked = false;
+    // 连续 dts 不前进的帧数，跨 tick 累计（读得慢时单个 tick 的时间上限内凑不满阈值），dts 前进、seek 或换分片时清零
+    // Consecutive frames whose dts did not advance, accumulated across ticks (with slow reads one tick's time budget
+    // never reaches the threshold); reset when dts advances, on seek or on a segment switch
+    size_t _stalled_frames = 0;
 
     std::string _origin_url;
 

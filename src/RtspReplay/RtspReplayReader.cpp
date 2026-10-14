@@ -281,7 +281,6 @@ bool RtspReplayReader::readSample() {
     static constexpr size_t kMaxStalledFrames = 64;
     toolkit::Ticker tick_ticker;
     size_t tick_frames = 0;
-    size_t stalled_frames = 0;
     // 读帧异常或 demuxer 卡死时结束会话，即使开启 fileRepeat 也不能从头重播（会反复撞上同一个坏点）
     // A demux exception or a stuck demuxer ends the session; it must not loop back even with fileRepeat
     // (it would hit the same broken spot again and again)
@@ -322,8 +321,8 @@ bool RtspReplayReader::readSample() {
             break;
         }
         ++tick_frames;
-        stalled_frames = frame->dts() <= _last_dts ? stalled_frames + 1 : 0;
-        if (stalled_frames > kMaxStalledFrames) {
+        _stalled_frames = frame->dts() <= _last_dts ? _stalled_frames + 1 : 0;
+        if (_stalled_frames > kMaxStalledFrames) {
             ErrorL << "replay demuxer stuck, stop session: frame_dts=" << frame->dts() << ", pts=" << frame->pts()
                    << ", size=" << frame->size() << ", track=" << frame->getTrackTypeStr() << ", playhead_offset_ms=" << cur_offset
                    << ", segment_index=" << _active_segment_index
@@ -458,6 +457,7 @@ bool RtspReplayReader::openSegmentByIndex(size_t segment_index, uint64_t local_s
 
     _demuxer = std::move(demuxer);
     _active_segment_index = segment_index;
+    _stalled_frames = 0;
     _active_segment_begin_offset_ms = absoluteToOffset(segment._begin_at_ms);
     _active_segment_end_offset_ms = absoluteToOffset(segment._end_at_ms);
     return true;
@@ -583,6 +583,7 @@ void RtspReplayReader::setCurrentOffset(uint32_t offset_ms, bool sync_timeline) 
     auto old_offset = getCurrentOffset();
     _seek_to = offset_ms;
     _last_dts = offset_ms;
+    _stalled_frames = 0;
     _seek_ticker.resetTime();
 
     if (old_offset != offset_ms && _muxer) {

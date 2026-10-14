@@ -79,7 +79,7 @@ if(UNIX AND ENABLE_OBJCOPY)
     if (OBJCOPY_FOUND)
       add_custom_command(TARGET MediaServer
         POST_BUILD
-        COMMAND objcopy --only-keep-debug ${EXECUTABLE_OUTPUT_PATH}/MediaServer ${EXECUTABLE_OUTPUT_PATH}/MediaServer.debug
+        COMMAND objcopy --only-keep-debug --compress-debug-sections=zlib ${EXECUTABLE_OUTPUT_PATH}/MediaServer ${EXECUTABLE_OUTPUT_PATH}/MediaServer.debug
         COMMAND objcopy --strip-all ${EXECUTABLE_OUTPUT_PATH}/MediaServer
         COMMAND objcopy --add-gnu-debuglink=${EXECUTABLE_OUTPUT_PATH}/MediaServer.debug ${EXECUTABLE_OUTPUT_PATH}/MediaServer
       )

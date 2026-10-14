@@ -104,6 +104,7 @@ private:
     uint64_t _duration_ms = 0;
     std::unordered_map<int, Track::Ptr> _tracks;
     toolkit::ResourcePool<toolkit::BufferRaw> _buffer_pool;
+    std::string _file_path;
 };
 
 class MultiMP4Demuxer : public TrackSource {

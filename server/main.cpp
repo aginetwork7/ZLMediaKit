@@ -10,10 +10,16 @@
 
 #include <signal.h>
 #include <iostream>
+#include <fstream>
+#if defined(__linux__) && defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include "Util/File.h"
 #include "Util/logger.h"
 #include "Util/SSLBox.h"
 #include "Util/onceToken.h"
+#include "Util/TimeTicker.h"
+#include "Thread/WorkThreadPool.h"
 #include "Util/CMD.h"
 #include "Network/TcpServer.h"
 #include "Network/UdpServer.h"
@@ -234,6 +240,51 @@ string g_ini_file;
 // 加载ssl证书函数对象
 std::function<void()> g_reload_certificates;
 
+#if defined(__linux__) && defined(__GLIBC__)
+static uint64_t readRssAnonKB() {
+    std::ifstream in("/proc/self/status");
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.compare(0, 8, "RssAnon:") == 0) {
+            return strtoull(line.data() + 8, nullptr, 10);
+        }
+    }
+    return 0;
+}
+#endif
+
+// glibc 不会主动把各线程分配池中已释放的内存归还给系统，回放等突发负载过后进程内存只升不降，周期性整体回收一次
+// glibc keeps memory freed into per-thread arenas instead of returning it to the OS, so process memory only grows after
+// bursts such as replay; trim the whole process periodically
+static void startMallocTrimTimer() {
+#if defined(__linux__) && defined(__GLIBC__)
+    // 关闭时每分钟检查一次配置是否被重新打开  Disabled: re-check the config every minute
+    static constexpr uint64_t kDisabledRecheckMS = 60 * 1000;
+    // 释放超过 16MB 或耗时超过 50ms 时打日志  Log when more than 16MB is released or the trim takes over 50ms
+    static constexpr uint64_t kLogReleasedKB = 16 * 1024;
+    static constexpr uint64_t kLogCostMS = 50;
+    // 首次也按配置的间隔执行（启动后半小时）  The first run also waits a full interval
+    GET_CONFIG(uint32_t, first_trim_sec, General::kMallocTrimSec);
+    auto first_delay_ms = first_trim_sec ? first_trim_sec * 1000ULL : kDisabledRecheckMS;
+    WorkThreadPool::Instance().getPoller()->doDelayTask(first_delay_ms, []() -> uint64_t {
+        GET_CONFIG(uint32_t, trim_sec, General::kMallocTrimSec);
+        if (!trim_sec) {
+            return kDisabledRecheckMS;
+        }
+        auto before_kb = readRssAnonKB();
+        Ticker ticker;
+        malloc_trim(0);
+        auto cost_ms = ticker.elapsedTime();
+        auto after_kb = readRssAnonKB();
+        if (before_kb > after_kb + kLogReleasedKB || cost_ms > kLogCostMS) {
+            InfoL << "malloc_trim released " << (before_kb > after_kb ? before_kb - after_kb : 0) / 1024 << "MB, rss_anon "
+                  << before_kb / 1024 << "MB -> " << after_kb / 1024 << "MB, cost " << cost_ms << "ms";
+        }
+        return trim_sec * 1000ULL;
+    });
+#endif
+}
+
 int start_main(int argc,char *argv[]) {
     {
         CMD_main cmd_main;
@@ -426,6 +477,7 @@ int start_main(int argc,char *argv[]) {
         InfoL << "已启动http api 接口";
         installWebHook();
         InfoL << "已启动http hook 接口";
+        startMallocTrimTimer();
 
         try {
             // rtsp服务器，端口默认554  [AUTO-TRANSLATED:07937d81]

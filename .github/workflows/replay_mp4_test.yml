@@ -1,0 +1,35 @@
+name: Replay MP4 test
+
+# 回放读取 MP4 的回归测试（tests/test_mp4_growing.cpp）：边写边读、截断、损坏 box、读错误等
+# Regression test for replay MP4 reading (tests/test_mp4_growing.cpp): read-while-write, truncation,
+# corrupted boxes, read errors after a disk pull, etc.
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test_mp4_growing:
+    runs-on: ubuntu-24.04
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: 下载submodule源码
+      run: mv -f .gitmodules_github .gitmodules && git submodule sync && git submodule update --init
+
+    - name: 安装依赖
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake libssl-dev ffmpeg
+
+    - name: 编译
+      run: |
+        cmake -S . -B linux_build -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON -DENABLE_WEBRTC=OFF -DENABLE_SRT=OFF \
+          -DENABLE_API=OFF -DENABLE_PYTHON=OFF -DENABLE_FFMPEG=OFF -DENABLE_SERVER=OFF -DENABLE_PLAYER=OFF
+        cmake --build linux_build --target test_mp4_growing -j $(nproc)
+
+    - name: 运行
+      run: |
+        ffmpeg -loglevel error -f lavfi -i testsrc=size=640x360:rate=25 -t 30 -c:v libx264 -g 50 -pix_fmt yuv420p source.mp4
+        mkdir -p mp4_work
+        ./release/linux/Release/test_mp4_growing source.mp4 mp4_work 450

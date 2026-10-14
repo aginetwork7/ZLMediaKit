@@ -26,6 +26,12 @@
 #include "Record/MP4Demuxer.h"
 #include "Record/MP4Muxer.h"
 #include "Util/logger.h"
+#if defined(__linux__)
+#include <climits>
+#include <dirent.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 using namespace std;
 using namespace toolkit;
@@ -276,6 +282,65 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
+#if defined(__linux__)
+    // 拔盘：seek 仍成功但 read 报错（ferror 置位）。MP4FileDisk 必须返回负错误码，读帧要在有限次内结束，
+    // 不能把读失败当成读到一帧而反复返回同一帧。glibc 上把只写 fd dup2 到已打开文件的 fd 即可稳定造出该情形
+    // Disk pull: seek still succeeds but read fails (ferror set). MP4FileDisk must return a negative error and
+    // reading must end within a bounded number of calls instead of returning the same frame forever. On glibc,
+    // dup2-ing a write-only fd over the open file's fd reproduces this reliably
+    size_t io_error_failures = 0;
+    {
+        MP4Demuxer demuxer;
+        demuxer.openMP4(growing);
+        bool key = false, eof = false;
+        for (int i = 0; i < 10; ++i) {
+            demuxer.readFrame(key, eof);
+        }
+        char real[PATH_MAX] = { 0 };
+        size_t swapped = 0;
+        if (realpath(growing.data(), real)) {
+            int wfd = open(growing.data(), O_WRONLY);
+            if (auto dir = opendir("/proc/self/fd")) {
+                while (auto ent = readdir(dir)) {
+                    int fd = atoi(ent->d_name);
+                    char link[PATH_MAX] = { 0 };
+                    if (fd <= 2 || fd == wfd || fd == dirfd(dir)
+                        || readlink(("/proc/self/fd/" + string(ent->d_name)).data(), link, sizeof(link) - 1) <= 0) {
+                        continue;
+                    }
+                    if (strcmp(link, real) == 0 && dup2(wfd, fd) >= 0) {
+                        ++swapped;
+                    }
+                }
+                closedir(dir);
+            }
+            close(wfd);
+        }
+        // stdio 缓冲里已读入的数据仍可读出，只要求有限次内结束且 dts 不连续重复
+        // Data already in the stdio buffer can still be read; only require a bounded end and no run of repeated dts
+        size_t calls = 0, repeats = 0, max_repeats = 0;
+        int64_t last_dts = -1;
+        eof = false;
+        while (!eof && calls < 10000) {
+            ++calls;
+            auto frame = demuxer.readFrame(key, eof);
+            if (!frame) {
+                continue;
+            }
+            repeats = (int64_t)frame->dts() == last_dts ? repeats + 1 : 0;
+            max_repeats = std::max(max_repeats, repeats);
+            last_dts = frame->dts();
+        }
+        cout << "io error: swapped_fds=" << swapped << " calls=" << calls << " eof=" << eof << " max_repeated_dts=" << max_repeats << endl;
+        if (!swapped || !eof || max_repeats > 8) {
+            cout << "FAIL io error: reading did not stop after the fd started failing" << endl;
+            ++io_error_failures;
+        }
+    }
+#else
+    size_t io_error_failures = 0;
+#endif
+
     size_t max_seen = 0;
     size_t partial_hits = 0;
     for (auto &ret : partial_reads) {
@@ -550,7 +615,7 @@ int main(int argc, char *argv[]) {
         cout << "FAIL concurrent: no partial read observed" << endl;
     }
     auto failed = concurrent.failures + truncated.failures + shrink_failures + boundary_failures + placeholder_failures
-                  + stale_offset_failures + filler_failures + mdat_first_failures + huge_trun_failures + plain_failures + (partial_hits ? 0 : 1);
+                  + stale_offset_failures + filler_failures + mdat_first_failures + huge_trun_failures + io_error_failures + plain_failures + (partial_hits ? 0 : 1);
     cout << (failed ? "RESULT: FAIL" : "RESULT: PASS") << endl;
     return failed ? 1 : 0;
 }

@@ -103,13 +103,13 @@ CSV 字段：
 | 字段 | 含义 |
 | --- | --- |
 | `record_type` | `sample` 为逐秒样本；`summary` 为最后一行峰值摘要。 |
-| `本地时间` | 采样时间。 |
-| `时间戳` | Unix 秒级时间戳。 |
-| `客户端类型` | 固定为 `rtsp_replay`。 |
-| `流个数` | 压测目标连接数。 |
-| `cpu(%)` | MediaServer 进程 CPU 使用率。 |
-| `内存(MB)` | MediaServer 进程 RSS。 |
-| `网络io(MB/s)` | 当前命名空间网络接口的收发总速率。 |
-| `cpu_peak(%)` | 仅 `summary` 行填写，整个采样期 CPU 峰值。 |
-| `内存峰值(MB)` | 仅 `summary` 行填写，整个采样期 RSS 峰值。 |
+| `local_time` | 采样时间。 |
+| `timestamp` | Unix 秒级时间戳。 |
+| `client_type` | 固定为 `rtsp_replay`。 |
+| `stream_count` | 压测目标连接数。 |
+| `cpu_percent` | MediaServer 进程 CPU 使用率。 |
+| `memory_mb` | MediaServer 进程 RSS。 |
+| `network_io_mb_per_s` | 当前命名空间网络接口的收发总速率。 |
+| `cpu_peak_percent` | 仅 `summary` 行填写，整个采样期 CPU 峰值。 |
+| `memory_peak_mb` | 仅 `summary` 行填写，整个采样期 RSS 峰值。 |
 | `reason` | 仅 `summary` 行填写，采样停止原因。 |

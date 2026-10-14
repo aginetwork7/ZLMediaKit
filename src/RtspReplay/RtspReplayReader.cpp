@@ -282,6 +282,10 @@ bool RtspReplayReader::readSample() {
     toolkit::Ticker tick_ticker;
     size_t tick_frames = 0;
     size_t stalled_frames = 0;
+    // 读帧异常或 demuxer 卡死时结束会话，即使开启 fileRepeat 也不能从头重播（会反复撞上同一个坏点）
+    // A demux exception or a stuck demuxer ends the session; it must not loop back even with fileRepeat
+    // (it would hit the same broken spot again and again)
+    bool fatal = false;
 
     bool keyFrame = false;
     bool eof = false;
@@ -309,6 +313,7 @@ bool RtspReplayReader::readSample() {
             ErrorL << "replay demux exception, stop session: segment_index=" << _active_segment_index << ", err=" << ex.what();
             _demuxer = nullptr;
             eof = true;
+            fatal = true;
             break;
         }
         if (!frame) {
@@ -325,6 +330,7 @@ bool RtspReplayReader::readSample() {
                    << ", file=" << (_active_segment_index < _catalog._segments.size() ? _catalog._segments[_active_segment_index]._file_path : "");
             _demuxer = nullptr;
             eof = true;
+            fatal = true;
             break;
         }
         _last_dts = frame->dts();
@@ -392,7 +398,7 @@ bool RtspReplayReader::readSample() {
     }
 
     GET_CONFIG(bool, file_repeat, Record::kFileRepeat);
-    if (eof && (file_repeat)) {
+    if (eof && file_repeat && !fatal) {
         return seekToOffset((uint32_t)_window_begin_offset_ms);
     }
     if(eof){

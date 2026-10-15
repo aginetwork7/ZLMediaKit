@@ -122,6 +122,9 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
     }
 
     for (auto &track : tracks) {
+        // 按轨道类型索引，与 remapFrameToSessionNpt() 对帧的处理一致，原因见该函数
+        // Index by track type, matching what remapFrameToSessionNpt() does to every frame; see the reason there
+        track->setIndex(track->getTrackType());
         _muxer->addTrack(track);
         if (track->getTrackType() == TrackVideo) {
             _have_video = true;
@@ -724,19 +727,32 @@ uint64_t RtspReplayReader::offsetToSessionNpt(uint64_t offset_ms) const {
     return offset_ms > _window_begin_offset_ms ? (offset_ms - _window_begin_offset_ms) : 0;
 }
 
+// 所有送进 _muxer 的帧都必须经过这里
+// Every frame pushed to _muxer must go through here
 Frame::Ptr RtspReplayReader::remapFrameToSessionNpt(const Frame::Ptr &frame) const {
-    if (!frame || !_started) {
+    if (!frame) {
         return frame;
     }
 
-    auto dts = (int64_t)offsetToSessionNpt(frame->dts());
-    auto pts = (int64_t)offsetToSessionNpt(frame->pts());
-    if (pts < dts) {
-        pts = dts;
+    auto dts = (int64_t)frame->dts();
+    auto pts = (int64_t)frame->pts();
+    if (_started) {
+        dts = (int64_t)offsetToSessionNpt(frame->dts());
+        pts = (int64_t)offsetToSessionNpt(frame->pts());
+        if (pts < dts) {
+            pts = dts;
+        }
     }
 
     auto stamped = std::make_shared<FrameStamp>(frame);
     stamped->setStamp(dts, pts);
+    // MP4Demuxer 以文件内的 mp4 track_id 作为帧索引，而同一路录像的不同分片里音视频的 track_id 顺序可能不同
+    // （录制开始时谁先就绪谁是 1）。统一按轨道类型索引（setup() 中 track 同样如此），否则跨分片后视频帧会被送进
+    // 音频的 RTP 打包器，反之亦然。
+    // MP4Demuxer indexes frames by the file's mp4 track_id, and segments of the same recording may number audio/video
+    // differently (whichever was ready first when recording started gets 1). Index by track type, as setup() does for
+    // the tracks, otherwise after crossing such segments video frames go to the audio RTP encoder and vice versa.
+    stamped->setIndex(stamped->getTrackType());
     return stamped;
 }
 

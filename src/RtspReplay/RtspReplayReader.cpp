@@ -122,6 +122,12 @@ void RtspReplayReader::setup(const MediaTuple &tuple, const RtspReplayCatalogRes
     }
 
     for (auto &track : tracks) {
+        // MP4Demuxer 以文件内的 mp4 track_id 作为 track/帧索引，而同一路录像的不同分片里音视频的 track_id 顺序可能不同
+        // （录制开始时谁先就绪谁是 1）。统一按轨道类型索引，否则跨分片后视频帧会被送进音频的 RTP 打包器，反之亦然。
+        // MP4Demuxer indexes tracks and frames by the file's mp4 track_id, and segments of the same recording may number
+        // audio/video differently (whichever was ready first when recording started gets 1). Index by track type instead,
+        // otherwise after crossing such segments video frames go to the audio RTP encoder and vice versa.
+        track->setIndex(track->getTrackType());
         _muxer->addTrack(track);
         if (track->getTrackType() == TrackVideo) {
             _have_video = true;
@@ -519,6 +525,7 @@ Frame::Ptr RtspReplayReader::readFrameWithSegmentSwitch(bool &keyFrame, bool &eo
             } else {
                 auto stamped = std::make_shared<FrameStamp>(frame);
                 stamped->setStamp((int64_t)global_dts, (int64_t)global_pts);
+                stamped->setIndex(stamped->getTrackType()); // match the track index set in setup()
                 return stamped;
             }
         }
@@ -665,6 +672,7 @@ bool RtspReplayReader::seekToOffset(uint32_t offset_seek_ms) {
 
             auto stamped = std::make_shared<FrameStamp>(frame);
             stamped->setStamp((int64_t)global_dts, (int64_t)global_pts);
+            stamped->setIndex(stamped->getTrackType()); // match the track index set in setup()
             if (_muxer) {
                 if (_started) {
                     // Re-anchor the paced sender on the actually located frame instead of the

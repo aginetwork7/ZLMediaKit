@@ -28,7 +28,9 @@ typedef mediakit::HttpArgs ArgsType;
 namespace Hook {
 // web hook回复最大超时时间  [AUTO-TRANSLATED:9a059363]
 // Maximum timeout for web hook reply
+extern const std::string kEnable;
 extern const std::string kTimeoutSec;
+extern const std::string kOnDeleteWebRTC;
 }//namespace Hook
 
 void installWebHook();

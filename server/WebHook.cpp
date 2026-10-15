@@ -38,6 +38,7 @@ const string kEnable = HOOK_FIELD "enable";
 const string kTimeoutSec = HOOK_FIELD "timeoutSec";
 const string kOnPublish = HOOK_FIELD "on_publish";
 const string kOnPlay = HOOK_FIELD "on_play";
+const string kOnDeleteWebRTC = HOOK_FIELD "on_delete_webrtc";
 const string kOnFlowReport = HOOK_FIELD "on_flow_report";
 const string kOnRtspRealm = HOOK_FIELD "on_rtsp_realm";
 const string kOnRtspAuth = HOOK_FIELD "on_rtsp_auth";
@@ -65,6 +66,7 @@ static onceToken token([]() {
     // Default hook address is set to empty, using default behavior (e.g. no authentication)
     mINI::Instance()[kOnPublish] = "";
     mINI::Instance()[kOnPlay] = "";
+    mINI::Instance()[kOnDeleteWebRTC] = "";
     mINI::Instance()[kOnFlowReport] = "";
     mINI::Instance()[kOnRtspRealm] = "";
     mINI::Instance()[kOnRtspAuth] = "";

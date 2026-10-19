@@ -690,6 +690,7 @@ namespace RTC
                 MS_DEBUG_TAG(dtls, "running [role:client]");
 
                 SSL_set_connect_state(this->ssl);
+                ERR_clear_error();
                 SSL_do_handshake(this->ssl);
                 SendPendingOutgoingDtlsData();
                 SetTimeout();
@@ -702,6 +703,7 @@ namespace RTC
                 MS_DEBUG_TAG(dtls, "running [role:server]");
 
                 SSL_set_accept_state(this->ssl);
+                ERR_clear_error();
                 SSL_do_handshake(this->ssl);
 
                 break;
@@ -761,6 +763,11 @@ namespace RTC
               len);
         }
 
+        // The OpenSSL error queue is per-thread and may contain stale errors pushed by
+        // other code on this poller thread (e.g. libsrtp AES-GCM), which would make
+        // SSL_get_error() report SSL_ERROR_SSL spuriously. Clear it before SSL I/O.
+        ERR_clear_error();
+
         // Must call SSL_read() to process received DTLS data.
         read = SSL_read(this->ssl, static_cast<void*>(DtlsTransport::sslReadBuffer), SslReadBufferSize);
 
@@ -813,6 +820,7 @@ namespace RTC
 
         int written;
 
+        ERR_clear_error();
         written = SSL_write(this->ssl, static_cast<const void*>(data), static_cast<int>(len));
 
         if (written < 0)
@@ -1434,6 +1442,7 @@ namespace RTC
             return;
         }
 
+        ERR_clear_error();
         DTLSv1_handle_timeout(this->ssl);
 
         // If required, send DTLS data.

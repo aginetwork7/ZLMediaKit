@@ -2388,43 +2388,8 @@ void installWebApi() {
             invoker(401, headerOut, "token incorrect");
             return;
         }
-        GET_CONFIG(bool, hook_enable, Hook::kEnable);
-        GET_CONFIG(string, hook_delete_webrtc, Hook::kOnDeleteWebRTC);
-        if (!hook_enable || hook_delete_webrtc.empty()) {
-            invoker(403, headerOut, "delete authorization hook is not configured");
-            return;
-        }
-        ArgsType body;
-        body["transportId"] = allArgs["id"].data();
-        body["authorization"] = getValue(allArgs.parser, "Authorization");
-        body["ip"] = sender.get_peer_ip();
-        body["port"] = sender.get_peer_port();
-        body["method"] = "DELETE";
-        body["sessionType"] = obj->getSessionType();
-        if (auto batch = std::dynamic_pointer_cast<MultiSourceWebRtcPusher>(obj)) {
-            const auto &media_info = batch->getMediaInfo();
-            body["app"] = media_info.app;
-            body["stream"] = media_info.stream;
-            body["params"] = media_info.params;
-        } else if (auto pusher = std::dynamic_pointer_cast<WebRtcPusher>(obj)) {
-            const auto &media_info = pusher->getMediaInfo();
-            body["app"] = media_info.app;
-            body["stream"] = media_info.stream;
-            body["params"] = media_info.params;
-        } else if (auto player = std::dynamic_pointer_cast<WebRtcPlayer>(obj)) {
-            auto media_info = player->getMediaInfo();
-            body["app"] = media_info.app;
-            body["stream"] = media_info.stream;
-            body["params"] = media_info.params;
-        }
-        do_http_hook(hook_delete_webrtc, body, [obj, invoker, headerOut](const Value &result, const string &err) mutable {
-            if (!err.empty() || !result.isObject() || !result.isMember("code") || !result["code"].isInt() || result["code"].asInt() != 0) {
-                invoker(403, headerOut, "delete authorization rejected");
-                return;
-            }
-            obj->safeShutdown(SockException(Err_shutdown, "deleted by http api"));
-            invoker(200, headerOut, "");
-        });
+        obj->safeShutdown(SockException(Err_shutdown, "deleted by http api"));
+        invoker(200, headerOut, "");
     });
 
     // 获取WebRTCProxyPlayer 连接信息

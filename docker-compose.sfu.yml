@@ -2,7 +2,6 @@ services:
   zlmediakit:
     image: ${REGISTRY}/zlmediakit:${ZLM_TAG}
     container_name: zlmediakit
-    network_mode: host
     env_file:
       - ${PWD}/.env
     environment:
@@ -19,6 +18,13 @@ services:
     ulimits:
       rtprio: 99
     restart: always
+    networks:
+      - agi7
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8080:8080"
+      - "8000:8000"
 
   fluent-bit-zlm:
     image: fluent/fluent-bit:5.1

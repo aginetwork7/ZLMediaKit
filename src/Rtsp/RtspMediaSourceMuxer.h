@@ -59,6 +59,10 @@ public:
         _media_src->clearCache();
     }
 
+    void registWithoutData() {
+        _media_src->registWithoutData();
+    }
+
     void addTrackCompleted() override {
         RtspMuxer::addTrackCompleted();
         _media_src->setSdp(getSdp());

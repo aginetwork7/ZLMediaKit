@@ -99,6 +99,21 @@ public:
     void setSpeed(float speed);
 
     /**
+     * 获取帧环形缓存（不存在时创建），用于在进程内旁路订阅本流的帧（如打码会话）；必须在归属线程调用。
+     * 订阅者会计入观看人数。
+     * Get the frame ring (created on demand) to tap this stream's frames in-process (e.g. mask
+     * sessions); must be called on the owner poller. Its readers count as viewers.
+     */
+    RingType::Ptr getFrameRing(size_t gop_count = 1);
+
+    /**
+     * 所有 track 就绪后立即注册 rtsp 源，不等第一帧（打码流用）；必须在归属线程调用
+     * Register the rtsp source as soon as all tracks are ready, before the first frame (masked streams);
+     * must be called on the owner poller
+     */
+    void registRtspWithoutData();
+
+    /**
      * 重置track
      * Reset track
      

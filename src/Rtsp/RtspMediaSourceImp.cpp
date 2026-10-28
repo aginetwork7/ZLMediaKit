@@ -67,25 +67,37 @@ void RtspMediaSource::onWrite(RtpPacket::Ptr rtp, bool keyPos) {
         track->_ssrc = rtp->getSSRC();
     }
     if (!_ring) {
-        std::weak_ptr<RtspMediaSource> weakSelf = std::static_pointer_cast<RtspMediaSource>(shared_from_this());
-        auto lam = [weakSelf](int size) {
-            auto strongSelf = weakSelf.lock();
-            if (!strongSelf) {
-                return;
-            }
-            strongSelf->onReaderChanged(size);
-        };
-        // GOP默认缓冲512组RTP包，每组RTP包时间戳相同(如果开启合并写了，那么每组为合并写时间内的RTP包),  [AUTO-TRANSLATED:dc09b92e]
-        // GOP defaults to buffering 512 groups of RTP packets, each group of RTP packets has the same timestamp (if merge writing is enabled, then each group is the RTP packet within the merge writing time),
-        // 每次遇到关键帧第一个RTP包，则会清空GOP缓存(因为有新的关键帧了，同样可以实现秒开)  [AUTO-TRANSLATED:db44dc72]
-        // Every time a key frame's first RTP packet is encountered, the GOP cache will be cleared (because there is a new key frame, which can also achieve instant playback)
-        _ring = std::make_shared<RingType>(_ring_size, std::move(lam));
+        createRing();
         if (!_sdp.empty()) {
             regist();
         }
     }
    
     PacketCache<RtpPacket>::inputPacket(stamp, is_video, std::move(rtp), keyPos);
+}
+
+void RtspMediaSource::createRing() {
+    std::weak_ptr<RtspMediaSource> weakSelf = std::static_pointer_cast<RtspMediaSource>(shared_from_this());
+    auto lam = [weakSelf](int size) {
+        auto strongSelf = weakSelf.lock();
+        if (!strongSelf) {
+            return;
+        }
+        strongSelf->onReaderChanged(size);
+    };
+    // GOP默认缓冲512组RTP包，每组RTP包时间戳相同(如果开启合并写了，那么每组为合并写时间内的RTP包),  [AUTO-TRANSLATED:dc09b92e]
+    // GOP defaults to buffering 512 groups of RTP packets, each group of RTP packets has the same timestamp (if merge writing is enabled, then each group is the RTP packet within the merge writing time),
+    // 每次遇到关键帧第一个RTP包，则会清空GOP缓存(因为有新的关键帧了，同样可以实现秒开)  [AUTO-TRANSLATED:db44dc72]
+    // Every time a key frame's first RTP packet is encountered, the GOP cache will be cleared (because there is a new key frame, which can also achieve instant playback)
+    _ring = std::make_shared<RingType>(_ring_size, std::move(lam));
+}
+
+void RtspMediaSource::registWithoutData() {
+    if (_ring || _sdp.empty()) {
+        return;
+    }
+    createRing();
+    regist();
 }
 
 RtspMediaSourceImp::RtspMediaSourceImp(const MediaTuple& tuple, int ringSize): RtspMediaSource(tuple, ringSize)

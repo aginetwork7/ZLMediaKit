@@ -18,6 +18,7 @@
 #include "Common/MultiMediaSourceMuxer.h"
 #include "Record/MP4Reader.h"
 #include "RtspReplay/RtspReplaySourceFactory.h"
+#include "Mask/MaskSource.h"
 #include "Thread/WorkThreadPool.h"
 #include "PacketCache.h"
 
@@ -386,6 +387,32 @@ static MediaSource::Ptr find_l(const string &schema, const string &vhost_in, con
 
 static void findAsync_l(const MediaInfo &info, const std::shared_ptr<Session> &session, bool retry,
                         const function<void(const MediaSource::Ptr &src)> &cb){
+    // 打码请求（mask=true）：先按原始地址找到源流（直播源或新建的回放会话），再派生打码流。
+    // 任何失败都返回空，绝不回退到原始流（fail-closed）。
+    // Masked request (mask=true): find the source by the raw url (live stream or a new replay session),
+    // then derive the masked stream. Every failure yields nullptr, never the raw stream (fail-closed).
+    auto mask_req = MaskRequest::parse(info.params);
+    if (mask_req.enabled) {
+        GET_CONFIG(bool, mask_enable, Mask::kEnable);
+        if (!mask_enable || !retry) {
+            WarnL << "mask: masked play refused (mask.enable=" << mask_enable << "): " << info.getUrl();
+            cb(nullptr);
+            return;
+        }
+        MediaInfo raw = info;
+        raw.params.clear();
+        weak_ptr<Session> weak_session = session;
+        findAsync_l(raw, session, retry, [info, mask_req, weak_session, cb](const MediaSource::Ptr &src) {
+            auto strong_session = weak_session.lock();
+            if (!src || !strong_session) {
+                cb(nullptr);
+                return;
+            }
+            MaskSource::findAsync(info, mask_req, src, strong_session, cb);
+        });
+        return;
+    }
+
     weak_ptr<Session> weak_session = session;
     // Continuation that performs the actual lookup. For replay it is invoked after the heavy
     // catalog scan / openMP4 probe has finished off the request poller; for every other path it

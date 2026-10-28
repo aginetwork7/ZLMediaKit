@@ -448,6 +448,24 @@ extern const std::string kMaxReplaySessionCount;
 extern const std::string kReplayAppName;
 } // namespace Rtsp
 
+// //////////打码（edge-mask）配置///////////
+// //////////Privacy mask (edge-mask) Configuration///////////
+namespace Mask {
+// 是否允许 mask=true 的打码播放（关闭后打码请求一律失败，不会回退到原始画面）
+// Whether mask=true (privacy-masked) playback is allowed; when off such requests fail, never falling back to raw
+extern const std::string kEnable;
+// edge-mask 的 unix socket 路径 / unix socket path of edge-mask
+extern const std::string kSocketPath;
+// 打码流无人观看后的宽限期（秒），期间有新观看者则继续 / Grace period after the last viewer leaves (seconds)
+extern const std::string kGraceSec;
+// 等待 OPEN_ACK 的超时（毫秒）/ Timeout waiting for OPEN_ACK (ms)
+extern const std::string kOpenTimeoutMS;
+// 已送帧但没有任何输出的最长时间（毫秒），超过按失败关闭 / Max time without output while frames are sent (ms)
+extern const std::string kStallTimeoutMS;
+// 待发送帧上限，超过则丢到下一个关键帧 / Max frames queued to edge-mask before dropping to the next keyframe
+extern const std::string kMaxPendingFrames;
+} // namespace Mask
+
 // //////////RTMP服务器配置///////////  [AUTO-TRANSLATED:8de6f41f]
 // //////////RTMP Server Configuration///////////
 namespace Rtmp {

@@ -274,6 +274,27 @@ static onceToken token([]() {
 });
 } // namespace Rtsp
 
+// //////////打码（edge-mask）配置///////////
+// //////////Privacy mask (edge-mask) Configuration///////////
+namespace Mask {
+#define MASK_FIELD "mask."
+const string kEnable = MASK_FIELD "enable";
+const string kSocketPath = MASK_FIELD "socketPath";
+const string kGraceSec = MASK_FIELD "graceSec";
+const string kOpenTimeoutMS = MASK_FIELD "openTimeoutMS";
+const string kStallTimeoutMS = MASK_FIELD "stallTimeoutMS";
+const string kMaxPendingFrames = MASK_FIELD "maxPendingFrames";
+
+static onceToken token([]() {
+    mINI::Instance()[kEnable] = 1;
+    mINI::Instance()[kSocketPath] = "/opt/media/edge-mask/edge-mask.sock";
+    mINI::Instance()[kGraceSec] = 20;
+    mINI::Instance()[kOpenTimeoutMS] = 5000;
+    mINI::Instance()[kStallTimeoutMS] = 10000;
+    mINI::Instance()[kMaxPendingFrames] = 60;
+});
+} // namespace Mask
+
 // //////////RTMP服务器配置///////////  [AUTO-TRANSLATED:8de6f41f]
 // //////////RTMP Server Configuration///////////
 namespace Rtmp {

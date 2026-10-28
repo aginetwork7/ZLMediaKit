@@ -815,6 +815,17 @@ void MultiMediaSourceMuxer::onAllTrackReady() {
     InfoL << "stream: " << shortUrl() << " , codec info: " << getTrackInfoStr(this);
 }
 
+MultiMediaSourceMuxer::RingType::Ptr MultiMediaSourceMuxer::getFrameRing(size_t gop_count) {
+    createGopCacheIfNeed(gop_count);
+    return _ring;
+}
+
+void MultiMediaSourceMuxer::registRtspWithoutData() {
+    if (_rtsp) {
+        _rtsp->registWithoutData();
+    }
+}
+
 void MultiMediaSourceMuxer::createGopCacheIfNeed(size_t gop_count) {
     if (_ring) {
         return;

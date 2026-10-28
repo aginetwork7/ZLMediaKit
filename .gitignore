@@ -56,3 +56,5 @@
 /tools/docker.local/build.linux.*/
 /tools/docker.local/release/
 /tools/docker.local/.docker-local-context-*/
+/docs/*
+/.bench/media/*

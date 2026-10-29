@@ -131,7 +131,12 @@ void MaskSource::findAsync(const MediaInfo &info, const MaskRequest &req, const 
             lock_guard<mutex> lck(s_mtx);
             s_sources[out.shortUrl()] = mask;
         }
-        session_poller->async([out, session_poller, reply]() { waitRegistered(out, session_poller, 3000, reply); }, false);
+        // 打码流在源流全部 track 就绪后才注册：回放源要读到关键帧才就绪，GOP 长（实测 30 秒）的摄像头会超过 3 秒，
+        // 所以按普通流的等待上限 general.maxStreamWaitMS 等
+        // The masked stream registers once the source's tracks are ready; a replay source needs a key frame first,
+        // which can take over 3 s with long-GOP cameras, so wait as long as for a normal stream (general.maxStreamWaitMS)
+        GET_CONFIG(int, wait_ms, General::kMaxStreamWaitTimeMS);
+        session_poller->async([out, session_poller, reply]() { waitRegistered(out, session_poller, wait_ms, reply); }, false);
     });
 }
 

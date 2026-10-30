@@ -217,6 +217,12 @@ protected:
      */
     virtual bool onTrackFrame(const Frame::Ptr &frame) { return false; };
 
+    /**
+     * 日志里标识这个 sink 的名字（例如 app/stream），默认为空
+     * Name identifying this sink in logs (e.g. app/stream), empty by default
+     */
+    virtual std::string sinkName() const { return ""; }
+
 private:
     /**
      * 触发onAllTrackReady事件
@@ -234,6 +240,16 @@ private:
      */
     void checkTrackIfReady();
     void onAllTrackReady_l();
+    /**
+     * 记录音频时间戳是否前进；就绪后时间戳停住时限频告警
+     * Track whether the audio timestamp advances; warn (rate limited) when it stalls after all tracks are ready
+     */
+    void checkAudioStamp(const Frame::Ptr &frame);
+    /**
+     * 就绪前音频时间戳一直不前进时移除音频 track，返回是否移除
+     * Remove the audio track when its timestamp never advanced before all tracks are ready; returns whether removed
+     */
+    bool dropFrozenAudio(const Track::Ptr &track);
     /**
      * 添加aac静音轨道
      * Add AAC mute track
@@ -257,6 +273,21 @@ private:
     std::unordered_map<int, toolkit::List<Frame::Ptr> > _frame_unread;
     std::unordered_map<int, std::function<void()> > _track_ready_callback;
     std::unordered_map<int, std::pair<Track::Ptr, bool/*got frame*/> > _track_map;
+
+    // 音频时间戳检查：有的摄像头音频 RTP 时间戳恒为 0（RTCP SR 里 rtp_stamp 也是 0），
+    // 这样的音频播放器放不出声音，录像里时间戳全是 0 还会拖住回放定位
+    // Audio stamp check: some cameras send audio RTP timestamps that are always 0 (rtp_stamp 0 in RTCP SR as well);
+    // players cannot play such audio, and all-zero stamps in recordings break replay positioning
+    struct AudioStamp {
+        uint64_t last_dts = 0;
+        size_t frames = 0;   // 收到的音频帧数 / audio frames received
+        size_t stalled = 0;  // 时间戳连续未前进的帧数 / consecutive frames whose stamp did not advance
+        bool advanced = false;
+        toolkit::Ticker first_frame;  // 从第一帧起计时 / since the first frame
+        toolkit::Ticker warn;         // 告警限频 / warning rate limit
+        bool warned = false;
+    };
+    std::unordered_map<int, AudioStamp> _audio_stamp;
 };
 
 

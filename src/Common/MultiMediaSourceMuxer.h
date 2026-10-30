@@ -249,6 +249,9 @@ protected:
      */
     bool onTrackFrame(const Frame::Ptr &frame) override;
     bool onTrackFrame_l(const Frame::Ptr &frame);
+    // 用 app/stream 而不是 shortUrl()：拉流代理的源地址里可能带账号密码
+    // app/stream instead of shortUrl(): a proxy's origin url may carry credentials
+    std::string sinkName() const override { return _tuple.shortUrl(); }
 
 private:
     void createGopCacheIfNeed(size_t gop_count);

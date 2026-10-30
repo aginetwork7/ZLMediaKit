@@ -84,6 +84,7 @@ void MediaSink::resetTracks() {
     _track_map.clear();
     _frame_unread.clear();
     _track_ready_callback.clear();
+    _audio_stamp.clear();
 }
 
 bool MediaSink::inputFrame(const Frame::Ptr &frame) {
@@ -93,6 +94,9 @@ bool MediaSink::inputFrame(const Frame::Ptr &frame) {
     }
     // got frame
     it->second.second = true;
+    if (frame->getTrackType() == TrackAudio) {
+        checkAudioStamp(frame);
+    }
     auto ret = it->second.first->inputFrame(frame);
     if (_mute_audio_maker && frame->getTrackType() == TrackVideo) {
         // 视频驱动产生静音音频  [AUTO-TRANSLATED:2a8c789c]
@@ -105,8 +109,16 @@ bool MediaSink::inputFrame(const Frame::Ptr &frame) {
 
 void MediaSink::checkTrackIfReady() {
     if (!_all_track_ready && !_track_ready_callback.empty()) {
-        for (auto &pr : _track_map) {
-            if (pr.second.second && pr.second.first->ready()) {
+        for (auto it = _track_map.begin(); it != _track_map.end();) {
+            auto &track = it->second.first;
+            if (track->getTrackType() == TrackAudio && dropFrozenAudio(track)) {
+                it = _track_map.erase(it);
+                continue;
+            }
+            auto &pr = *it++;
+            // 音频的时间戳至少前进过一次才算就绪 / An audio track is ready only after its stamp has advanced once
+            auto stamp_ok = track->getTrackType() != TrackAudio || _audio_stamp[pr.first].advanced;
+            if (pr.second.second && track->ready() && stamp_ok) {
                 // Track由未就绪状态转换成就绪状态，我们就触发onTrackReady回调  [AUTO-TRANSLATED:f8975e53]
                 // When a Track transitions from an unready state to a ready state, we trigger the onTrackReady callback
                 auto it = _track_ready_callback.find(pr.first);
@@ -173,6 +185,71 @@ void MediaSink::checkTrackIfReady() {
             return;
         }
     }
+}
+
+void MediaSink::checkAudioStamp(const Frame::Ptr &frame) {
+    auto &st = _audio_stamp[frame->getIndex()];
+    if (st.frames++ == 0) {
+        st.first_frame.resetTime();
+        st.last_dts = frame->dts();
+        return;
+    }
+    if (frame->dts() != st.last_dts) {
+        if (st.warned) {
+            InfoL << "Audio timestamp advances again: " << sinkName() << ", codec " << frame->getCodecName() << ", dts "
+                  << st.last_dts << " -> " << frame->dts() << " after " << st.stalled << " stalled frames";
+            st.warned = false;
+        }
+        st.advanced = true;
+        st.stalled = 0;
+        st.last_dts = frame->dts();
+        return;
+    }
+    ++st.stalled;
+    // 就绪后时间戳停住：播放端会没声音，限频打印便于排查 / Stalled after ready: viewers get no sound; rate-limited log
+    static constexpr size_t kStalledWarnFrames = 50;
+    if (_all_track_ready && st.stalled >= kStalledWarnFrames && (!st.warned || st.warn.elapsedTime() > 60 * 1000)) {
+        WarnL << "Audio timestamp stopped advancing, viewers will get no sound: " << sinkName() << ", codec "
+              << frame->getCodecName() << ", dts " << st.last_dts << ", stalled frames " << st.stalled;
+        st.warned = true;
+        st.warn.resetTime();
+    }
+}
+
+bool MediaSink::dropFrozenAudio(const Track::Ptr &track) {
+    // 收到足够多的音频帧、时间跨度足够长，时间戳仍然一次都没前进，判定音频时间戳损坏。
+    // 正常音频第二帧时间戳就会前进；阈值按时间和帧数一起卡，等待期间视频的未就绪缓存（unready_frame_cache）不会溢出
+    // Enough audio frames over a long enough span and the stamp never advanced: the audio stamps are broken.
+    // Normal audio advances on its second frame; the thresholds (time and count) keep the wait short enough that
+    // the unready video cache (unready_frame_cache) does not overflow
+    static constexpr size_t kFrozenFrames = 10;
+    static constexpr uint64_t kFrozenMS = 500;
+    auto index = track->getIndex();
+    auto it = _audio_stamp.find(index);
+    if (it == _audio_stamp.end() || it->second.advanced || it->second.frames < kFrozenFrames
+        || it->second.first_frame.elapsedTime() < kFrozenMS) {
+        return false;
+    }
+    if (!getTrack(TrackVideo, false)) {
+        // 纯音频流没有别的 track 可用，保留 / Audio-only stream: nothing else to keep, leave it
+        if (!it->second.warned) {
+            WarnL << "Audio timestamp never advances (audio-only stream, kept): " << sinkName() << ", codec "
+                  << track->getCodecName() << ", dts " << it->second.last_dts << ", frames " << it->second.frames;
+            it->second.warned = true;
+        }
+        return false;
+    }
+    WarnL << "Audio timestamp never advances, audio track dropped (live/record/replay will have no audio): " << sinkName()
+          << ", codec " << track->getCodecName() << ", index " << index << ", dts " << it->second.last_dts << ", frames "
+          << it->second.frames << " in " << it->second.first_frame.elapsedTime()
+          << "ms. The source sends a constant audio RTP timestamp (RTCP SR rtp_stamp = 0 is the usual sign)";
+    _track_ready_callback.erase(index);
+    _frame_unread.erase(index);
+    _audio_stamp.erase(it);
+    if (_max_track_size > 1) {
+        _max_track_size -= 1;
+    }
+    return true;
 }
 
 void MediaSink::addTrackCompleted() {

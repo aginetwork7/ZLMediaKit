@@ -246,6 +246,9 @@ bool MediaSink::dropFrozenAudio(const Track::Ptr &track) {
     _track_ready_callback.erase(index);
     _frame_unread.erase(index);
     _audio_stamp.erase(it);
+    // 不补静音 AAC：音频本来就是坏的，按纯视频流处理（补上的 AAC 有的拉流端不支持，会刷错误）
+    // No mute AAC either: the audio is broken anyway, treat it as a video-only stream (some players reject the AAC)
+    _add_mute_audio = false;
     if (_max_track_size > 1) {
         _max_track_size -= 1;
     }

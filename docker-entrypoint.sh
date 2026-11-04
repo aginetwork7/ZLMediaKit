@@ -23,6 +23,19 @@ esac
 
 HOOK_BASE_URL=${MEDIA_SERVICE_HOOK_BASE_URL%/}
 
+# MEDIA_ALLOW_IP_RANGE 覆盖 [http] allow_ip_range；未设置或为空时保留配置文件默认值。
+# 格式同配置文件：逗号分隔，单个 IP 或 起始-结束，不支持 CIDR。
+if [ -n "${MEDIA_ALLOW_IP_RANGE:-}" ]; then
+  allow_ip_range=$(printf '%s' "$MEDIA_ALLOW_IP_RANGE" | tr -d ' ')
+  case "$allow_ip_range" in
+    *[!0-9A-Fa-f.:,-]*)
+      echo "invalid MEDIA_ALLOW_IP_RANGE: $MEDIA_ALLOW_IP_RANGE" >&2
+      exit 1
+      ;;
+  esac
+  sed -i "s|^allow_ip_range=.*|allow_ip_range=${allow_ip_range}|" "$config_file"
+fi
+
 if [ -n "${MEDIA_SERVER_ID:-}" ]; then
   set -- "$@" --media-server-id "$MEDIA_SERVER_ID"
 fi

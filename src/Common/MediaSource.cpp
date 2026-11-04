@@ -134,10 +134,12 @@ uint64_t MediaSource::getAliveSecond() const {
 
 vector<Track::Ptr> MediaSource::getTracks(bool ready) const {
     auto listener = _listener.lock();
-    if (!listener) {
+    // A listener without a muxer (e.g. WHIP batch sources) has no muxed tracks.
+    auto muxer = listener ? listener->getMuxer(const_cast<MediaSource &>(*this)) : nullptr;
+    if (!muxer) {
         return vector<Track::Ptr>();
     }
-    return listener->getMuxer(const_cast<MediaSource &>(*this))->getTracks(ready);
+    return muxer->getTracks(ready);
 }
 
 void MediaSource::setListener(const std::weak_ptr<MediaSourceEvent> &listener){
@@ -279,15 +281,18 @@ bool MediaSource::setupRecord(Recorder::type type, bool start, const string &cus
         WarnL << "未设置MediaSource的事件监听者，setupRecord失败:" << getUrl();
         return false;
     }
-    return listener->getMuxer(const_cast<MediaSource &>(*this))->setupRecord(type, start, custom_path, max_second);
+    auto muxer = listener->getMuxer(const_cast<MediaSource &>(*this));
+    if (!muxer) {
+        WarnL << "MediaSource没有muxer，setupRecord失败:" << getUrl();
+        return false;
+    }
+    return muxer->setupRecord(type, start, custom_path, max_second);
 }
 
 bool MediaSource::isRecording(Recorder::type type){
     auto listener = _listener.lock();
-    if(!listener){
-        return false;
-    }
-    return listener->getMuxer(const_cast<MediaSource &>(*this))->isRecording(type);
+    auto muxer = listener ? listener->getMuxer(const_cast<MediaSource &>(*this)) : nullptr;
+    return muxer && muxer->isRecording(type);
 }
 
 void MediaSource::startSendRtp(const MediaSourceEvent::SendRtpArgs &args, const std::function<void(uint16_t, const toolkit::SockException &)> cb) {
@@ -296,15 +301,18 @@ void MediaSource::startSendRtp(const MediaSourceEvent::SendRtpArgs &args, const 
         cb(0, SockException(Err_other, "尚未设置事件监听器"));
         return;
     }
-    return listener->getMuxer(const_cast<MediaSource &>(*this))->startSendRtp(args, cb);
+    auto muxer = listener->getMuxer(const_cast<MediaSource &>(*this));
+    if (!muxer) {
+        cb(0, SockException(Err_other, "MediaSource没有muxer"));
+        return;
+    }
+    return muxer->startSendRtp(args, cb);
 }
 
 bool MediaSource::stopSendRtp(const string &ssrc) {
     auto listener = _listener.lock();
-    if (!listener) {
-        return false;
-    }
-    return listener->getMuxer(const_cast<MediaSource &>(*this))->stopSendRtp(ssrc);
+    auto muxer = listener ? listener->getMuxer(const_cast<MediaSource &>(*this)) : nullptr;
+    return muxer && muxer->stopSendRtp(ssrc);
 }
 
 template<typename MAP, typename LIST, typename First, typename ...KeyTypes>

@@ -28,10 +28,9 @@ constexpr int kCodeNotFound = -500;
 MultiSourceWebRtcPusher::Ptr MultiSourceWebRtcPusher::create(const EventPoller::Ptr &poller,
                                                              const MediaInfo &info,
                                                              const ProtocolOption &option,
-                                                             size_t stream_count,
                                                              WebRtcTransport::Role role,
                                                              WebRtcTransport::SignalingProtocols signaling_protocols) {
-    MultiSourceWebRtcPusher::Ptr pusher(new MultiSourceWebRtcPusher(poller, info, option, stream_count), [](MultiSourceWebRtcPusher *ptr) {
+    MultiSourceWebRtcPusher::Ptr pusher(new MultiSourceWebRtcPusher(poller, info, option), [](MultiSourceWebRtcPusher *ptr) {
         ptr->onDestory();
         delete ptr;
     });
@@ -44,12 +43,10 @@ MultiSourceWebRtcPusher::Ptr MultiSourceWebRtcPusher::create(const EventPoller::
 
 MultiSourceWebRtcPusher::MultiSourceWebRtcPusher(const EventPoller::Ptr &poller,
                                                  const MediaInfo &info,
-                                                 const ProtocolOption &option,
-                                                 size_t stream_count)
+                                                 const ProtocolOption &option)
     : WebRtcTransportImp(poller)
     , _media_info(info)
-    , _option(option)
-    , _stream_count(stream_count) {
+    , _option(option) {
 }
 
 const MediaInfo &MultiSourceWebRtcPusher::getMediaInfo() const {
@@ -65,23 +62,55 @@ void MultiSourceWebRtcPusher::onStartWebRTC() {
     }
 
     _batch_session = std::make_shared<BatchPublishSession>(_media_info.app, _media_info.stream, getIdentifier(), _stream_count);
+    _batch_session->setListener(std::static_pointer_cast<MultiSourceWebRtcPusher>(shared_from_this()));
     if (!_batch_session->initFromSdp(*_answer_sdp, _answer_sdp->toRtspSdp())) {
         onShutdown(SockException(Err_other, "batch stream table init failed"));
         return;
     }
 
-    if (!BatchPublishSessionManager::Instance().addSession(_batch_session)) {
-        onShutdown(SockException(Err_other, "already publishing"));
-        return;
+    if (auto old = BatchPublishSessionManager::Instance().replaceSession(_batch_session)) {
+        WarnL << "batch session replaced, app=" << _media_info.app << ", nvrId=" << _media_info.stream
+              << ", oldTransportId=" << old->getTransportId() << ", newTransportId=" << getIdentifier();
+        if (auto old_transport = WebRtcTransportManager::Instance().getItem(old->getTransportId())) {
+            old_transport->safeShutdown(SockException(Err_shutdown, "replaced by new batch session"));
+        }
     }
     InfoL << "batch session created, app=" << _media_info.app << ", nvrId=" << _media_info.stream
           << ", streamCount=" << _stream_count << ", transportId=" << getIdentifier();
 }
 
+bool MultiSourceWebRtcPusher::close(MediaSource &sender) {
+    return false;
+}
+
+int MultiSourceWebRtcPusher::totalReaderCount(MediaSource &sender) {
+    return sender.readerCount();
+}
+
+MediaOriginType MultiSourceWebRtcPusher::getOriginType(MediaSource &sender) const {
+    return MediaOriginType::rtc_push;
+}
+
+string MultiSourceWebRtcPusher::getOriginUrl(MediaSource &sender) const {
+    return _media_info.full_url;
+}
+
+std::shared_ptr<SockInfo> MultiSourceWebRtcPusher::getOriginSock(MediaSource &sender) const {
+    return static_pointer_cast<SockInfo>(getSession());
+}
+
+toolkit::EventPoller::Ptr MultiSourceWebRtcPusher::getOwnerPoller(MediaSource &sender) {
+    return getPoller();
+}
+
+float MultiSourceWebRtcPusher::getLossRate(MediaSource &sender, TrackType type) {
+    return WebRtcTransportImp::getLossRate(type);
+}
+
 void MultiSourceWebRtcPusher::onDestory() {
     if (_batch_session) {
         _batch_session->clearAllSource();
-        BatchPublishSessionManager::Instance().removeSession(_batch_session->getApp(), _batch_session->getNvrId());
+        BatchPublishSessionManager::Instance().removeSession(_batch_session->getApp(), _batch_session->getNvrId(), _batch_session);
         InfoL << "batch session closed, app=" << _batch_session->getApp() << ", nvrId=" << _batch_session->getNvrId()
               << ", transportId=" << getIdentifier();
         _batch_session = nullptr;
@@ -112,15 +141,16 @@ void MultiSourceWebRtcPusher::onCheckSdp(SdpType type, RtcSession &sdp) {
     }
 
     CHECK(expect_audio, "batch offer layout invalid, dangling audio track without video");
-    CHECK(av_count == _stream_count,
-          StrPrinter << "batch offer streamCount mismatch, required=" << _stream_count << ", got=" << av_count);
+    CHECK(av_count > 0, "batch offer has no audio/video pair");
+    _stream_count = av_count;
 }
 
 void MultiSourceWebRtcPusher::onRtcConfigure(RtcConfigure &configure) const {
     WebRtcTransportImp::onRtcConfigure(configure);
     configure.audio.direction = configure.video.direction = RtpDirection::recvonly;
     configure.audio.preferred_codec = { CodecG711A };
-    configure.video.preferred_codec = { CodecH264 };
+    // The edge sends its packed frames as VP8: browsers depacketize them without parsing the payload.
+    configure.video.preferred_codec = { CodecVP8, CodecH264 };
 }
 
 bool MultiSourceWebRtcPusher::enableDatachannelEcho() const {
@@ -197,6 +227,8 @@ void MultiSourceWebRtcPusher::handleBind(const Json::Value &root,
     auto data = root["data"];
     auto nvr_id = data["nvrId"].asString();
     auto source_id = data["sourceId"].asString();
+    // 0 means the default WHEP viewer limit.
+    auto max_viewers = data["maxViewers"].isUInt() ? (size_t)data["maxViewers"].asUInt() : 0;
 
     if (nvr_id.empty()) {
         sendReply("whip.bind", request_id, source_id, "", dc_stream_id, ppid, kCodeInvalidArgs, "invalidNvrId");
@@ -214,7 +246,7 @@ void MultiSourceWebRtcPusher::handleBind(const Json::Value &root,
     string stream_id;
     string reason;
     bool reused = false;
-    auto ok = _batch_session->bindSource(source_id, stream_id, reused, reason);
+    auto ok = _batch_session->bindSource(source_id, max_viewers, stream_id, reused, reason);
     if (!ok) {
         sendReply("whip.bind", request_id, source_id, "", dc_stream_id, ppid, kCodeOtherFailed,
                   reason.empty() ? "noAvailableStreamId" : reason);

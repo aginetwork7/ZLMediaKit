@@ -2212,11 +2212,6 @@ void installWebApi() {
     static auto whip_whep_func = [](const char *type, const char *session_source, API_ARGS_STRING_ASYNC) {
         auto offer = allArgs.args;
         CHECK(!offer.empty(), "http body(webrtc offer sdp) is empty");
-        if (!strcasecmp(type, "push_batch")) {
-            CHECK_ARGS("streamCount");
-            auto stream_count = atoi(allArgs["streamCount"].data());
-            CHECK(stream_count > 0, "streamCount invalid");
-        }
 
         auto &session = static_cast<Session&>(sender);
         auto location = std::string(session.overSsl() ? "https://" : "http://") + allArgs["host"] + delete_webrtc_url;

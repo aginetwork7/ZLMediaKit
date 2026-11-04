@@ -17,14 +17,13 @@
 
 namespace mediakit {
 
-class MultiSourceWebRtcPusher : public WebRtcTransportImp {
+class MultiSourceWebRtcPusher : public WebRtcTransportImp, public MediaSourceEvent {
 public:
     using Ptr = std::shared_ptr<MultiSourceWebRtcPusher>;
 
     static Ptr create(const toolkit::EventPoller::Ptr &poller,
                       const MediaInfo &info,
                       const ProtocolOption &option,
-                      size_t stream_count,
                       WebRtcTransport::Role role,
                       WebRtcTransport::SignalingProtocols signaling_protocols);
 
@@ -37,6 +36,16 @@ protected:
     void onRtcConfigure(RtcConfigure &configure) const override;
     void onRecvRtp(MediaTrack &track, const std::string &rid, RtpPacket::Ptr rtp) override;
     bool enableDatachannelEcho() const override;
+
+    ///////MediaSourceEvent override (sources of the batch)///////
+    // A single source cannot be closed on its own; the edge releases it with whip.unbind.
+    bool close(MediaSource &sender) override;
+    int totalReaderCount(MediaSource &sender) override;
+    MediaOriginType getOriginType(MediaSource &sender) const override;
+    std::string getOriginUrl(MediaSource &sender) const override;
+    std::shared_ptr<toolkit::SockInfo> getOriginSock(MediaSource &sender) const override;
+    toolkit::EventPoller::Ptr getOwnerPoller(MediaSource &sender) override;
+    float getLossRate(MediaSource &sender, TrackType type) override;
 #ifdef ENABLE_SCTP
     void OnSctpAssociationMessageReceived(RTC::SctpAssociation *sctpAssociation,
                                           uint16_t streamId,
@@ -48,8 +57,7 @@ protected:
 private:
     MultiSourceWebRtcPusher(const toolkit::EventPoller::Ptr &poller,
                             const MediaInfo &info,
-                            const ProtocolOption &option,
-                            size_t stream_count);
+                            const ProtocolOption &option);
 
     void handleBind(const Json::Value &root, const std::string &request_id, uint16_t dc_stream_id, uint32_t ppid);
     void handleUnbind(const Json::Value &root, const std::string &request_id, uint16_t dc_stream_id, uint32_t ppid);
@@ -65,6 +73,7 @@ private:
 private:
     MediaInfo _media_info;
     ProtocolOption _option;
+    // Derived from the offer's audio/video pair count in onCheckSdp.
     size_t _stream_count = 0;
     BatchPublishSession::Ptr _batch_session;
 };

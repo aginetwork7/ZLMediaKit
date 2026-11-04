@@ -25,8 +25,11 @@ class BatchPublishSessionManager {
 public:
     static BatchPublishSessionManager &Instance();
 
-    bool addSession(const BatchPublishSession::Ptr &session);
-    void removeSession(const std::string &app, const std::string &nvr_id);
+    // Registers the session and returns the session it replaced (nullptr if none).
+    // The replaced session's sources are released before returning.
+    BatchPublishSession::Ptr replaceSession(const BatchPublishSession::Ptr &session);
+    // Removes the session only if it is still the registered one for app/nvr_id.
+    void removeSession(const std::string &app, const std::string &nvr_id, const BatchPublishSession::Ptr &session);
     BatchPublishSession::Ptr getSession(const std::string &app, const std::string &nvr_id) const;
     bool getSourceBinding(const std::string &source_id, BatchPublishSession::SourceBinding &binding, std::string &session_key) const;
 

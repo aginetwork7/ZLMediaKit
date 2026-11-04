@@ -58,6 +58,9 @@ bool BatchPublishSession::initFromSdp(const RtcSession &answer_sdp, const string
             return false;
         }
 
+        if (!m.plan.empty()) {
+            _video_vp8 = strcasecmp(m.plan[0].codec.data(), "VP8") == 0;
+        }
         av_pairs.emplace_back(pending_audio, &m);
         pending_audio = nullptr;
     }
@@ -108,7 +111,12 @@ bool BatchPublishSession::initFromSdp(const RtcSession &answer_sdp, const string
     return true;
 }
 
-bool BatchPublishSession::bindSource(const string &source_id, string &stream_id, bool &reused, string &reason) {
+void BatchPublishSession::setListener(std::weak_ptr<MediaSourceEvent> listener) {
+    lock_guard<recursive_mutex> lck(_mtx);
+    _listener = std::move(listener);
+}
+
+bool BatchPublishSession::bindSource(const string &source_id, size_t max_viewers, string &stream_id, bool &reused, string &reason) {
     lock_guard<recursive_mutex> lck(_mtx);
     reused = false;
 
@@ -120,6 +128,8 @@ bool BatchPublishSession::bindSource(const string &source_id, string &stream_id,
     auto it = _source_bindings.find(source_id);
     if (it != _source_bindings.end()) {
         reused = true;
+        // A repeated bind refreshes the viewer limit.
+        it->second.max_viewers = max_viewers;
         stream_id = it->second.stream_id;
         reason = "reused";
         return true;
@@ -146,6 +156,7 @@ bool BatchPublishSession::bindSource(const string &source_id, string &stream_id,
     binding.play_stream = source_id;
     binding.stream_id = stream_id;
     binding.online = true;
+    binding.max_viewers = max_viewers;
     _source_bindings[source_id] = std::move(binding);
 
     getOrCreateSource(source_id);
@@ -194,6 +205,42 @@ void BatchPublishSession::clearAllSource() {
     _state = SessionState::Closed;
 }
 
+// The edge publishes its packed frames (start code 00 00 00 01, then a ref byte and a flag byte
+// that both carry 0x20 on a key frame) as VP8 RTP payloads. Only the packet that starts a frame
+// (S=1, PID=0) is checked. Encrypted payloads never set the bits, so they have no key frames.
+static bool isEdgeKeyFrameStart(const RtpPacket::Ptr &rtp) {
+    auto payload = rtp->getPayload();
+    auto size = rtp->getPayloadSize();
+    if (size < 1 || (payload[0] & 0x17) != 0x10) {
+        return false;
+    }
+    size_t offset = 1;
+    if (payload[0] & 0x80) { // X: extension byte follows
+        if (size < 2) {
+            return false;
+        }
+        auto ext = payload[1];
+        offset = 2;
+        if (ext & 0x80) { // I: PictureID, 2 bytes when its M bit is set
+            if (size <= offset) {
+                return false;
+            }
+            offset += (payload[offset] & 0x80) ? 2 : 1;
+        }
+        if (ext & 0x40) { // L: TL0PICIDX
+            ++offset;
+        }
+        if (ext & 0x30) { // T/K: TID/KEYIDX
+            ++offset;
+        }
+    }
+    if (size < offset + 6) {
+        return false;
+    }
+    auto frame = payload + offset;
+    return frame[0] == 0 && frame[1] == 0 && frame[2] == 0 && frame[3] == 1 && (frame[4] & 0x20) && (frame[5] & 0xA0) == 0xA0;
+}
+
 bool BatchPublishSession::onRtp(TrackType type, const string &mid, uint32_t ssrc, uint64_t stamp_ms, const RtpPacket::Ptr &rtp) {
     lock_guard<recursive_mutex> lck(_mtx);
 
@@ -230,7 +277,10 @@ bool BatchPublishSession::onRtp(TrackType type, const string &mid, uint32_t ssrc
         return false;
     }
 
-    src->onWrite(rtp, false);
+    // Mark where an edge key frame starts so the GOP cache lets new WHEP viewers start from it.
+    // RtspMediaSourceImp::onWrite would re-detect key frames with its VP8 demuxer, which reads the edge
+    // format as all key frames, so write the raw RTP with the edge's own key frame marker.
+    src->RtspMediaSource::onWrite(rtp, type == TrackVideo && _video_vp8 && isEdgeKeyFrameStart(rtp));
     return true;
 }
 
@@ -266,6 +316,7 @@ Json::Value BatchPublishSession::getInfo() const {
         item["playApp"] = it.second.play_app;
         item["playStream"] = it.second.play_stream;
         item["online"] = it.second.online;
+        item["maxViewers"] = (Json::UInt64)it.second.max_viewers;
         sources.append(item);
     }
 
@@ -353,6 +404,7 @@ shared_ptr<RtspMediaSourceImp> BatchPublishSession::getOrCreateSource(const stri
     tuple.stream = source_id;
 
     auto src = std::make_shared<RtspMediaSourceImp>(tuple);
+    src->setListener(_listener);
     src->setSdp(_rtsp_sdp);
     _source_map[source_id] = src;
     InfoL << "batch source online, app=" << _app << ", nvrId=" << _nvr_id << ", sourceId=" << source_id;

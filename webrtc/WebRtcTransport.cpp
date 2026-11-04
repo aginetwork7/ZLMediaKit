@@ -1857,11 +1857,45 @@ void push_plugin(SocketHelper& sender, const WebRtcArgs &args, const onCreateWeb
     }
 }
 
+static constexpr size_t kDefaultBatchMaxViewers = 15;
+
+// Returns the WHEP viewer limit of a batch-published source, or 0 if the stream is not batch-published.
+static size_t getBatchViewerLimit(const MediaInfo &info) {
+    BatchPublishSession::SourceBinding binding;
+    string session_key;
+    if (!BatchPublishSessionManager::Instance().getSourceBinding(info.stream, binding, session_key) || binding.play_app != info.app) {
+        return 0;
+    }
+    return binding.max_viewers ? binding.max_viewers : kDefaultBatchMaxViewers;
+}
+
+// Counts WHEP players of the stream, including ones still negotiating.
+static size_t countWebRtcPlayers(const MediaInfo &info) {
+    size_t count = 0;
+    for (auto &transport : WebRtcTransportManager::Instance().getItems()) {
+        auto player = dynamic_pointer_cast<WebRtcPlayer>(transport);
+        if (!player) {
+            continue;
+        }
+        auto player_info = player->getMediaInfo();
+        if (player_info.vhost == info.vhost && player_info.app == info.app && player_info.stream == info.stream) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 template<typename Type>
 void play_plugin(SocketHelper &sender, const WebRtcArgs &args, const onCreateWebRtc &cb) {
 
     MediaInfo info(args["url"]);
 	info.authorization = args["Authorization"].data();
+    // Reject before the play hook so leaked play URLs cannot exceed the limit.
+    auto viewer_limit = getBatchViewerLimit(info);
+    if (viewer_limit && countWebRtcPlayers(info) >= viewer_limit) {
+        cb(WebRtcException(SockException(Err_other, "viewerLimit")));
+        return;
+    }
     auto session_ptr = static_pointer_cast<Session>(sender.shared_from_this());
     Broadcast::AuthInvoker invoker = [cb, info, session_ptr](const string &err) mutable {
         if (!err.empty()) {
@@ -1881,8 +1915,22 @@ void play_plugin(SocketHelper &sender, const WebRtcArgs &args, const onCreateWeb
             // 还原成rtc，目的是为了hook时识别哪种播放协议  [AUTO-TRANSLATED:fe8dd2dc]
             // Restore to RTC, the purpose is to identify which playback protocol during hooking
             info.schema = "rtc";
+            // Count and create under one lock so concurrent WHEPs cannot overshoot the limit.
+            static std::mutex s_viewer_limit_mtx;
+            std::unique_lock<std::mutex> viewer_lck(s_viewer_limit_mtx, std::defer_lock);
+            if (auto limit = getBatchViewerLimit(info)) {
+                viewer_lck.lock();
+                if (countWebRtcPlayers(info) >= limit) {
+                    viewer_lck.unlock();
+                    cb(WebRtcException(SockException(Err_other, "viewerLimit")));
+                    return;
+                }
+            }
             auto rtc = Type::create(EventPollerPool::Instance().getPoller(), src, info,
                 WebRtcTransport::Role::PEER, WebRtcTransport::SignalingProtocols::WHEP_WHIP);
+            if (viewer_lck.owns_lock()) {
+                viewer_lck.unlock();
+            }
             cb(*rtc);
         });
     };
@@ -1900,20 +1948,15 @@ void play_plugin(SocketHelper &sender, const WebRtcArgs &args, const onCreateWeb
 void push_batch_plugin(SocketHelper& sender, const WebRtcArgs &args, const onCreateWebRtc &cb) {
     MediaInfo info(args["url"]);
     info.authorization = args["Authorization"].data();
-    auto stream_count = (size_t)std::max<int>(atoi(std::string(args["streamCount"]).data()), 1);
 
-    if (BatchPublishSessionManager::Instance().getSession(info.app, info.stream)) {
-        cb(WebRtcException(SockException(Err_other, "already publishing")));
-        return;
-    }
-
-    Broadcast::PublishAuthInvoker invoker = [cb, info, stream_count](const string &err, const ProtocolOption &option) mutable {
+    // A new batch session replaces the existing one for the same app/nvrId; stream count comes from the offer.
+    Broadcast::PublishAuthInvoker invoker = [cb, info](const string &err, const ProtocolOption &option) mutable {
         if (!err.empty()) {
             cb(WebRtcException(SockException(Err_other, err)));
             return;
         }
 
-        auto rtc = MultiSourceWebRtcPusher::create(EventPollerPool::Instance().getPoller(), info, option, stream_count,
+        auto rtc = MultiSourceWebRtcPusher::create(EventPollerPool::Instance().getPoller(), info, option,
             WebRtcTransport::Role::PEER, WebRtcTransport::SignalingProtocols::WHEP_WHIP);
         cb(*rtc);
     };

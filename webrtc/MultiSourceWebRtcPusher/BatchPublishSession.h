@@ -62,13 +62,18 @@ public:
         std::string play_stream;
         std::string stream_id;
         bool online = false;
+        // WHEP viewer limit for this source; 0 means the default.
+        size_t max_viewers = 0;
     };
 
     BatchPublishSession(std::string app, std::string nvr_id, std::string transport_id, size_t stream_count);
 
+    // Listener of every source this session creates (the owning batch pusher).
+    void setListener(std::weak_ptr<MediaSourceEvent> listener);
+
     bool initFromSdp(const RtcSession &answer_sdp, const std::string &rtsp_sdp);
 
-    bool bindSource(const std::string &source_id, std::string &stream_id, bool &reused, std::string &reason);
+    bool bindSource(const std::string &source_id, size_t max_viewers, std::string &stream_id, bool &reused, std::string &reason);
     bool unbindSource(const std::string &source_id, std::string &stream_id, bool &reused);
 
     void clearAllSource();
@@ -99,8 +104,11 @@ private:
     std::string _app;
     std::string _nvr_id;
     std::string _transport_id;
+    std::weak_ptr<MediaSourceEvent> _listener;
     size_t _stream_count = 0;
     std::string _rtsp_sdp;
+    // Only the edge's VP8 payloads carry a key frame marker the GOP cache can use.
+    bool _video_vp8 = false;
     SessionState _state = SessionState::Init;
 
     std::vector<StreamContext> _streams;

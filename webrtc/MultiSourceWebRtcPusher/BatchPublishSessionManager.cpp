@@ -19,20 +19,24 @@ BatchPublishSessionManager &BatchPublishSessionManager::Instance() {
     return s_instance;
 }
 
-bool BatchPublishSessionManager::addSession(const BatchPublishSession::Ptr &session) {
+BatchPublishSession::Ptr BatchPublishSessionManager::replaceSession(const BatchPublishSession::Ptr &session) {
     lock_guard<recursive_mutex> lck(_mtx);
-    auto key = makeKey(session->getApp(), session->getNvrId());
-    auto it = _session_map.find(key);
-    if (it != _session_map.end()) {
-        return false;
+    auto &slot = _session_map[makeKey(session->getApp(), session->getNvrId())];
+    auto old = std::move(slot);
+    slot = session;
+    if (old) {
+        // Release the old sources before the new session can register the same app/sourceId.
+        old->clearAllSource();
     }
-    _session_map.emplace(std::move(key), session);
-    return true;
+    return old;
 }
 
-void BatchPublishSessionManager::removeSession(const string &app, const string &nvr_id) {
+void BatchPublishSessionManager::removeSession(const string &app, const string &nvr_id, const BatchPublishSession::Ptr &session) {
     lock_guard<recursive_mutex> lck(_mtx);
-    _session_map.erase(makeKey(app, nvr_id));
+    auto it = _session_map.find(makeKey(app, nvr_id));
+    if (it != _session_map.end() && it->second == session) {
+        _session_map.erase(it);
+    }
 }
 
 BatchPublishSession::Ptr BatchPublishSessionManager::getSession(const string &app, const string &nvr_id) const {

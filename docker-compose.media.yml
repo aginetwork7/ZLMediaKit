@@ -1,24 +1,46 @@
-version: '3.8'
-
+# Restart constraint: ZLMediaKit carries every live stream, recording and
+# playback. It lives alone in this compose module ("media"), which follows the
+# same rules as every other module: an ai-box upgrade recreates it only when
+# this service itself changed (image/ZLM_TAG or the configuration below). While
+# it shared docker-compose.tinynvr.yml, every tinynvr or diskserver upgrade
+# recreated it too.
+# - Keep zlmediakit the only service in this file.
+# - Do not add env_file or interpolate hardware/custom env variables here: a
+#   changed value would recreate the container.
+# See docs/architecture.md, "Media (ZLMediaKit) Restart Constraint".
 services:
-  zlmediakit:
-    image: ${REGISTRY}/zlmediakit:${ZLM_TAG}
-    container_name: zlmediakit
-    network_mode: host
-    environment:
-      MEDIA_CONFIG_TYPE: ${MEDIA_CONFIG_TYPE:-media}
-      MEDIA_SERVICE_HOOK_BASE_URL: ${MEDIA_SERVICE_HOOK_BASE_URL:?MEDIA_SERVICE_HOOK_BASE_URL is required}
-      MEDIA_SERVER_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}
-    cap_add:
-      - SYS_NICE
-    ulimits:
-      rtprio: 99
-    ports:
-      - "8089:8089"
-      - "554:554"
-      - "8449:8449"
-    volumes:
-      - /data/agi7/tinynvr/auth:/opt/media/auth
-      - /data/agi7/zlmediakit/log:/opt/media/bin/log
-      - /data/mergefs:/data/mergefs:rslave
-    restart: unless-stopped
+    zlmediakit:
+        image: ${REGISTRY}/zlmediakit:${ZLM_TAG}
+        container_name: zlmediakit
+        network_mode: host
+        # Required by docker-entrypoint.sh. Literal values on purpose (see the
+        # restart constraint above).
+        environment:
+            MEDIA_CONFIG_TYPE: media
+            MEDIA_SERVICE_HOOK_BASE_URL: http://127.0.0.1:8088/internal/media/zlm/hooks
+            MEDIA_SERVER_SECRET: ITD3alrYMAuL7GDPXn5de45Y7Zj071OV
+        cap_add:
+            - SYS_NICE
+        ulimits:
+            rtprio: 99
+        volumes:
+            - /data/agi7/tinynvr/auth:/opt/media/auth
+            - /var/agi7/zlmediakit/log:/opt/media/bin/log
+            # edge-mask's unix socket (masked streams); see docker-compose.edge-mask.yml
+            - /var/agi7/edge-mask/run:/opt/media/edge-mask:rw
+            # /data/mergefs is the pool mountpoint created by diskserver's host setup
+            # (mergerfs is the tool, mergefs is the path -- not a typo); it is owned by
+            # the diskserver image, so it cannot be moved from here.
+            # Known gap: it should live under /data/agi7, because hardware
+            # detection sizes the device from consts.StorageDir (/data/agi7)
+            # only -- a pool on its own filesystem here is invisible to it, so
+            # the device gets profiled on the system disk instead. Moving it
+            # needs the matching diskserver release first; changing only this
+            # line mounts an empty directory and breaks storage silently.
+            # See docs/diskserver-host-assets.md.
+            # rslave: the host (re)mounts that pool after these containers start -- see
+            # DISKSERVER_STORAGE_REMOUNT_INTERVAL_MIN. With the default propagation the
+            # container keeps the mount it saw at start and silently serves stale or
+            # empty storage instead of erroring.
+            - /data/mergefs:/data/mergefs:rslave
+        restart: unless-stopped

@@ -12,7 +12,7 @@ services:
       EXTERN_IP: ${EXTERN_IP:?EXTERN_IP is required}
     volumes:
       - ${PWD}/log:/opt/media/bin/log
-      # - ${PWD}/conf:/opt/media/conf
+#      - ${PWD}/conf/config.sfu.ini:/opt/media/conf/config.sfu.ini
     cap_add:
       - SYS_NICE
     ulimits:
@@ -23,8 +23,29 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "8080:8080"
-      - "8000:8000"
+      - "8080:8080/tcp"
+      - "8000:8000/tcp"
+      - "8000:8000/udp"
+
+  zlm-exporter:
+    image: ${REGISTRY}/zlm-exporter:${ZLM_EXPORTER_TAG:?ZLM_EXPORTER_TAG is required}
+    container_name: zlm-exporter
+    depends_on:
+      - zlmediakit
+    environment:
+      ZLM_API_URL: http://zlmediakit:8080
+      ZLM_API_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+    networks:
+      - agi7
+    ports:
+      # 仅允许中心 Prometheus 访问（安全组/防火墙限制来源 IP）
+      - "${ZLM_EXPORTER_PORT:-9101}:9101/tcp"
 
   fluent-bit-zlm:
     image: fluent/fluent-bit:5.1

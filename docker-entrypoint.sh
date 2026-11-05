@@ -33,9 +33,10 @@ if [ -n "${MEDIA_ALLOW_IP_RANGE:-}" ]; then
       exit 1
       ;;
   esac
-  sed "s|^allow_ip_range=.*|allow_ip_range=${allow_ip_range}|" "$config_file" > "/tmp/${config_file}.tmp" &&
-  cat "/tmp/${config_file}.tmp" > "$config_file" &&
-  rm -f "/tmp/${config_file}.tmp"
+  tmp_file=$(mktemp)
+  sed "s|^allow_ip_range=.*|allow_ip_range=${allow_ip_range}|" "$config_file" > "$tmp_file"
+  cat "$tmp_file" > "$config_file"
+  rm -f "$tmp_file"
 fi
 
 if [ -n "${MEDIA_SERVER_ID:-}" ]; then

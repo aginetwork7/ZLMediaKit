@@ -15,6 +15,9 @@ services:
         network_mode: host
         # Required by docker-entrypoint.sh. Literal values on purpose (see the
         # restart constraint above).
+        # NOTE: this file is a reference copy only. The ai-box deployment uses its
+        # own compose in the deployment repo, where MEDIA_SERVER_SECRET is replaced
+        # with the real value; the secret below is a development placeholder.
         environment:
             MEDIA_CONFIG_TYPE: media
             MEDIA_SERVICE_HOOK_BASE_URL: http://127.0.0.1:8088/internal/media/zlm/hooks

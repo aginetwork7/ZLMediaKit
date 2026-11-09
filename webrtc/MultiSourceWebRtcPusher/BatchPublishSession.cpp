@@ -186,7 +186,7 @@ bool BatchPublishSession::unbindSource(const string &source_id, string &stream_i
 
     releaseStreamId(stream_id);
 
-    _source_map.erase(source_id);
+    releaseSource(source_id);
     return true;
 }
 
@@ -194,7 +194,12 @@ void BatchPublishSession::clearAllSource() {
     lock_guard<recursive_mutex> lck(_mtx);
     _state = SessionState::Closing;
     _source_bindings.clear();
-    _source_map.clear();
+    while (!_source_map.empty()) {
+        // Copy the key: releaseSource erases the entry it refers to.
+        auto source_id = _source_map.begin()->first;
+        releaseSource(source_id);
+    }
+    _rejected_sources.clear();
     _free_stream_ids.clear();
     for (auto &ctx : _streams) {
         ctx.current_source_id.clear();
@@ -268,7 +273,7 @@ bool BatchPublishSession::onRtp(TrackType type, const string &mid, uint32_t ssrc
     ctx->receiving = true;
     ctx->state = StreamState::Receiving;
 
-    if (ctx->current_source_id.empty()) {
+    if (ctx->current_source_id.empty() || _rejected_sources.count(ctx->current_source_id)) {
         return false;
     }
 
@@ -280,7 +285,15 @@ bool BatchPublishSession::onRtp(TrackType type, const string &mid, uint32_t ssrc
     // Mark where an edge key frame starts so the GOP cache lets new WHEP viewers start from it.
     // RtspMediaSourceImp::onWrite would re-detect key frames with its VP8 demuxer, which reads the edge
     // format as all key frames, so write the raw RTP with the edge's own key frame marker.
-    src->RtspMediaSource::onWrite(rtp, type == TrackVideo && _video_vp8 && isEdgeKeyFrameStart(rtp));
+    // The first write registers the stream; a failure only drops this source, the session goes on.
+    try {
+        src->RtspMediaSource::onWrite(rtp, type == TrackVideo && _video_vp8 && isEdgeKeyFrameStart(rtp));
+    } catch (std::exception &ex) {
+        WarnL << "batch source rejected, app=" << _app << ", nvrId=" << _nvr_id << ", sourceId=" << ctx->current_source_id << ": " << ex.what();
+        _rejected_sources.emplace(ctx->current_source_id);
+        _source_map.erase(ctx->current_source_id);
+        return false;
+    }
     return true;
 }
 
@@ -409,6 +422,20 @@ shared_ptr<RtspMediaSourceImp> BatchPublishSession::getOrCreateSource(const stri
     _source_map[source_id] = src;
     InfoL << "batch source online, app=" << _app << ", nvrId=" << _nvr_id << ", sourceId=" << source_id;
     return src;
+}
+
+// releaseSource unregisters the stream right away: other holders (such as a getMediaList call) may
+// keep the object alive for a while, and the next session's stream of the same name must not collide.
+void BatchPublishSession::releaseSource(const string &source_id) {
+    _rejected_sources.erase(source_id);
+    auto it = _source_map.find(source_id);
+    if (it == _source_map.end()) {
+        return;
+    }
+    auto src = std::move(it->second);
+    _source_map.erase(it);
+    src->unregist();
+    InfoL << "batch source offline, app=" << _app << ", nvrId=" << _nvr_id << ", sourceId=" << source_id;
 }
 
 BatchPublishSession::StreamContext *BatchPublishSession::findStreamByMid(const string &mid) {

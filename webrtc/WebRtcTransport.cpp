@@ -652,6 +652,7 @@ void WebRtcTransport::setOnShutdown(function<void(const SockException &ex)> cb) 
 
 void WebRtcTransport::onShutdown(const SockException &ex) {
     TraceL << ex;
+    _shutdown = true;
     if (_on_shutdown) {
         _on_shutdown(ex);
     }
@@ -796,6 +797,9 @@ void WebRtcTransport::inputSockData(const char *buf, int len, const SocketHelper
 
 void WebRtcTransport::inputSockData(const char *buf, int len, const IceTransport::Pair::Ptr& pair) {
     // DebugL;
+    if (_shutdown) {
+        return;
+    }
     if (len > 0) {
         addRecvBytes((size_t)len);
         updateNetworkInfo(pair);
@@ -1874,7 +1878,7 @@ static size_t countWebRtcPlayers(const MediaInfo &info) {
     size_t count = 0;
     for (auto &transport : WebRtcTransportManager::Instance().getItems()) {
         auto player = dynamic_pointer_cast<WebRtcPlayer>(transport);
-        if (!player) {
+        if (!player || player->isShutdown()) {
             continue;
         }
         auto player_info = player->getMediaInfo();

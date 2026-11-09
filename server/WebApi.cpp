@@ -2261,6 +2261,10 @@ void installWebApi() {
         limit = limit > 0 ? std::min(limit, 200) : 100;
 
         auto transports = WebRtcTransportManager::Instance().getItems();
+        // A shut down transport only lingers until its ICE sessions time out; it is no longer a connection.
+        transports.erase(std::remove_if(transports.begin(), transports.end(), [](const WebRtcTransportImp::Ptr &transport) {
+            return transport->isShutdown();
+        }), transports.end());
         std::sort(transports.begin(), transports.end(), [](const WebRtcTransportImp::Ptr &left, const WebRtcTransportImp::Ptr &right) {
             auto left_is_whip = start_with(left->getSessionType(), "whip");
             auto right_is_whip = start_with(right->getSessionType(), "whip");

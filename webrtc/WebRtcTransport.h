@@ -158,6 +158,9 @@ public:
 
     const toolkit::EventPoller::Ptr &getPoller() const { return _poller; }
     void setPoller(toolkit::EventPoller::Ptr poller) { _poller = std::move(poller); }
+    // A shut down transport may outlive onShutdown while ICE sessions on other candidate pairs still
+    // hold it; it then neither answers its peer nor counts as a viewer.
+    bool isShutdown() const { return _shutdown; }
 
     toolkit::Session::Ptr getSession() const;
     void removePair(const toolkit::SocketHelper *socket);
@@ -267,6 +270,7 @@ protected:
     onGatheringCandidateCB _on_gathering_candidate = nullptr;
 
 private:
+    std::atomic<bool> _shutdown { false };
     mutable std::string _delete_rand_str;
     std::string _identifier;
     toolkit::EventPoller::Ptr _poller;

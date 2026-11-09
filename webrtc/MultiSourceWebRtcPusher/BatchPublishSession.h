@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "json/json.h"
@@ -92,6 +93,7 @@ public:
 
 private:
     std::shared_ptr<RtspMediaSourceImp> getOrCreateSource(const std::string &source_id);
+    void releaseSource(const std::string &source_id);
     StreamContext *findStreamByMid(const std::string &mid);
     StreamContext *findStreamBySsrc(uint32_t ssrc, TrackType type);
     StreamContext *findStreamById(const std::string &stream_id);
@@ -117,6 +119,9 @@ private:
     std::unordered_map<uint32_t, std::string> _audio_ssrc_to_stream;
     std::unordered_map<uint32_t, std::string> _video_ssrc_to_stream;
     std::unordered_map<std::string, std::shared_ptr<RtspMediaSourceImp>> _source_map;
+    // Sources whose stream could not be registered (the name is taken by another publisher); their
+    // RTP is dropped until they are unbound, so one bad source never breaks the batch session.
+    std::unordered_set<std::string> _rejected_sources;
     std::unordered_map<std::string, std::string> _mid_to_stream;
 
     mutable std::recursive_mutex _mtx;

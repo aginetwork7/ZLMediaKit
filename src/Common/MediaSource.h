@@ -546,15 +546,17 @@ public:
     // Generate MediaSource from mp4 file
     static MediaSource::Ptr createFromMP4(const std::string &schema, const std::string &vhost, const std::string &app, const std::string &stream, const std::string &file_path = "", bool check_app = true);
 
+    // 媒体注销  [AUTO-TRANSLATED:06a0630a]
+    // Media unregistration
+    // Public so a publisher can drop the name before the object dies (batch WHIP sub streams).
+    bool unregist();
+
 protected:
     // 媒体注册  [AUTO-TRANSLATED:dbf5c730]
     // Media registration
     void regist();
 
 private:
-    // 媒体注销  [AUTO-TRANSLATED:06a0630a]
-    // Media unregistration
-    bool unregist();
     // 触发媒体事件  [AUTO-TRANSLATED:0c2f9ae6]
     // Trigger media events
     void emitEvent(bool regist);

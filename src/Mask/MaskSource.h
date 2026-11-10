@@ -89,6 +89,7 @@ private:
     // 回放背压：引擎发送缓冲积压时暂停回放读取，排空后恢复（与用户的暂停合并）
     // Replay back-pressure: pause reading the replay while the engine send buffer is backed up (combined with user pause)
     void setBackpressure(bool on);
+    void syncRtpExtTime();
     void applySourcePause();
     void startGraceTimer();
     void shutdown(const std::string &reason);
@@ -132,6 +133,7 @@ private:
     bool _out_gate = true;  // 等关键帧再分发引擎输出 / wait for a keyframe before publishing engine output
     uint64_t _sent_since_output = 0;
     bool _backpressure = false;     // 回放背压中 / replay back-pressure active
+    bool _rtp_ext_synced = false;   // 打码流已用回放源的绝对时间起点 / masked muxer has the replay's absolute time base
     bool _await_seek = false;       // seek 后等新位置的关键帧 / after a seek, wait for a keyframe at the new position
     uint64_t _seek_target_ms = 0;
     float _granted_speed = 0;       // 引擎已接受、待生效的倍速 / speed accepted by the engine, not applied yet

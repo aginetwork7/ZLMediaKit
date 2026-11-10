@@ -322,6 +322,10 @@ void MultiMediaSourceMuxer::setRtpExtTimeBaseMS(uint64_t base_ms) {
     }
 }
 
+uint64_t MultiMediaSourceMuxer::getRtpExtTimeBaseMS() const {
+    return _rtsp ? _rtsp->getRtpExtTimeBaseMS() : 0;
+}
+
 void MultiMediaSourceMuxer::setSpeed(float speed) {
     if (_paced_sender) {
         _paced_sender->setSpeed(speed);

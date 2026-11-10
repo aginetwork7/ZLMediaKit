@@ -87,6 +87,10 @@ public:
 
     // Set absolute time base (Unix ms) used by RTSP RTP extension timestamps.
     void setRtpExtTimeBaseMS(uint64_t base_ms);
+    // 0 表示未设置（直播，或回放还没定好窗口起点） / 0 when unset (live, or a replay whose window is not set yet)
+    uint64_t getRtpExtTimeBaseMS() const;
+    // 点播时长（秒），直播为 0 / VOD duration in seconds, 0 for live
+    float getDuration() const { return _dur_sec; }
 
     /**
      * 重置平滑发送缓存并重同步时间轴

@@ -75,6 +75,7 @@ public:
     // Set absolute time base (Unix ms) for RTP extension timestamp generation.
     // When set, extension time is computed as base + current RTP NPT(ms).
     void setRtpExtTimeBaseMS(uint64_t base_ms);
+    uint64_t getRtpExtTimeBaseMS() const { return _rtp_ext_time_base_ms; }
 
     /**
      * 添加ready状态的track

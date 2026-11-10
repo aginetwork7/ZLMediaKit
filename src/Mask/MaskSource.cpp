@@ -191,8 +191,11 @@ bool MaskSource::setup() {
 
     {
         lock_guard<mutex> lck(_muxer_mtx);
-        _muxer = make_shared<MultiMediaSourceMuxer>(_out_tuple, 0.0, option);
+        // 回放打码流与回放源一样是点播（时长相同），RTP 时间戳沿用回放会话的 NPT，见 syncRtpExtTime()
+        // A masked replay is VOD like its replay source (same duration); RTP stamps keep the replay session NPT
+        _muxer = make_shared<MultiMediaSourceMuxer>(_out_tuple, _replay ? src_muxer->getDuration() : 0.0, option);
     }
+    syncRtpExtTime();
     _muxer->setMediaListener(shared_from_this());
     for (auto &track : src_muxer->getTracks(true)) {
         if (track->getTrackType() == TrackVideo) {
@@ -454,6 +457,30 @@ void MaskSource::onSourceFrame(const Frame::Ptr &frame) {
     });
 }
 
+// 回放源在 RTP 扩展头里带每帧的绝对时间（窗口起点 + 会话 NPT），拉流端（edgebox）用它显示和定位播放进度；
+// 打码流的时间戳就是回放会话的 NPT（引擎原样带回），用同一个起点算出同样的绝对时间，seek 后进度条才会跳到新位置。
+// 回放源在开始读录像后才设置起点，打码流建立时可能还没有，取不到时在出帧时再取
+// The replay source carries each frame's absolute time in an RTP header extension (window start + session NPT);
+// the puller (edgebox) shows and positions playback with it. The masked stream's stamps are the replay session
+// NPT (echoed by the engine), so the same start gives the same absolute time and the progress bar follows a seek.
+// The replay sets its start only after it begins reading, so retry when frames come out if it is not set yet
+void MaskSource::syncRtpExtTime() {
+    if (!_replay || _rtp_ext_synced) {
+        return;
+    }
+    auto src = _src.lock();
+    auto src_muxer = src ? src->getMuxer() : nullptr;
+    auto base_ms = src_muxer ? src_muxer->getRtpExtTimeBaseMS() : 0;
+    if (!base_ms) {
+        return;
+    }
+    lock_guard<mutex> lck(_muxer_mtx);
+    if (_muxer) {
+        _muxer->setRtpExtTimeBaseMS(base_ms);
+        _rtp_ext_synced = true;
+    }
+}
+
 void MaskSource::setBackpressure(bool on) {
     if (_backpressure == on || _state == State::kClosed) {
         return;
@@ -485,6 +512,9 @@ void MaskSource::onEngineFrame(const MaskProto::FrameInfo &frame) {
             return;
         }
         _out_gate = false;
+    }
+    if (_replay && !_rtp_ext_synced) {
+        syncRtpExtTime();
     }
     // 引擎带回输入的 pts（微秒），换回毫秒；输出没有 B 帧，dts = pts
     // The engine echoes the input pts (microseconds); back to ms. The output has no B-frames, so dts = pts

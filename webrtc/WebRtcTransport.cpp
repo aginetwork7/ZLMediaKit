@@ -1861,7 +1861,8 @@ void push_plugin(SocketHelper& sender, const WebRtcArgs &args, const onCreateWeb
     }
 }
 
-static constexpr size_t kDefaultBatchMaxViewers = 15;
+// Used when whip.bind carries no maxViewers; matches the edge default (DefaultMaxViewers).
+static constexpr size_t kDefaultBatchMaxViewers = 16;
 
 // Returns the WHEP viewer limit of a batch-published source, or 0 if the stream is not batch-published.
 static size_t getBatchViewerLimit(const MediaInfo &info) {

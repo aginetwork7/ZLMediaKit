@@ -39,6 +39,7 @@
 
 #include "WebApi.h"
 #include "WebHook.h"
+#include "LogRedact.h"
 #include "FFmpegSource.h"
 
 #include "Common/config.h"
@@ -286,14 +287,18 @@ static inline void addHttpListener(){
                 }
 
                 LogContextCapture log(getLogger(), toolkit::LDebug, __FILE__, "http api debug", __LINE__);
-                log << "\r\n# request:\r\n" << parser.method() << " " << parser.fullUrl() << "\r\n";
+                // Credentials (API secret, media token, user/device JWT) are masked before logging.
+                log << "\r\n# request:\r\n" << parser.method() << " " << redactQuery(parser.fullUrl()) << "\r\n";
                 log << "# header:\r\n";
 
                 for (auto &pr : parser.getHeader()) {
-                    log << pr.first << " : " << pr.second << "\r\n";
+                    log << pr.first << " : " << (isSecretHeader(pr.first) ? kRedacted : pr.second) << "\r\n";
                 }
 
-                auto &content = parser.content();
+                auto content = parser.content();
+                if (toLowerCopy(parser["Content-Type"]).find("urlencoded") != std::string::npos) {
+                    content = redactQuery(content);
+                }
                 log << "# content:\r\n" << (content.size() > 4 * 1024 ? content.substr(0, 4 * 1024) : content) << "\r\n";
 
                 if (size > 0 && size < 4 * 1024) {

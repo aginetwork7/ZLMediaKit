@@ -2264,7 +2264,10 @@ void installWebApi() {
                 // 设置返回类型  [AUTO-TRANSLATED:ffc2a31a]
                 // Set return type
                 headerOut["Content-Type"] = "application/sdp";
-                headerOut["Location"] = location + "?id=" + exchanger.getIdentifier() + "&token=" + exchanger.deleteRandStr();
+                // The id is base64 and may hold '+', which the query parser decodes to a space: encode it so
+                // DELETE on this Location finds the session.
+                headerOut["Location"] = location + "?id=" + strCoding::UrlEncodeComponent(exchanger.getIdentifier())
+                    + "&token=" + strCoding::UrlEncodeComponent(exchanger.deleteRandStr());
                 invoker(201, headerOut, handler.getAnswerSdp(offer));
             } catch (std::exception &ex) {
                 // Covers every rejection: hook denial, viewer limit, invalid offer, stream not found.

@@ -94,7 +94,7 @@ fi
 
 mkdir -p "$log_dir"
 output_file="$log_dir/zlm-resource-$(date +%Y%m%d-%H%M%S).csv"
-csv_header='record_type,本地时间,时间戳,客户端类型,流个数,cpu(%),内存(MB),网络io(MB/s),cpu_peak(%),内存峰值(MB),reason'
+csv_header='record_type,local_time,timestamp,client_type,stream_count,cpu_percent,memory_mb,network_io_mb_per_s,cpu_peak_percent,memory_peak_mb,reason'
 printf '%s\n' "$csv_header" > "$output_file"
 printf '%s\n' "$csv_header"
 echo "Writing ZLM resource samples to $output_file"

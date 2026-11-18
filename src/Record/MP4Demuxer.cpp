@@ -44,6 +44,7 @@ MP4Demuxer::~MP4Demuxer() {
 void MP4Demuxer::openMP4(const string &file) {
     closeMP4();
 
+    _file_path = file;
     _mp4_file = std::make_shared<MP4FileDisk>();
     _mp4_file->openFile(file.data(), "rb+");
     _mov_reader = _mp4_file->createReader();
@@ -54,6 +55,7 @@ void MP4Demuxer::openMP4(const string &file) {
 void MP4Demuxer::closeMP4() {
     _mov_reader.reset();
     _mp4_file.reset();
+    _file_path.clear();
 }
 
 int MP4Demuxer::getAllTracks() {
@@ -127,6 +129,16 @@ Frame::Ptr MP4Demuxer::readFrame(bool &keyFrame, bool &eof) {
         ctx->flags = flags;
         ctx->track_id = track_id;
 
+        // 损坏文件中的 sample 大小可能是几百 MB 甚至 GB，超过上限按读失败处理（libmov 返回 -ENOMEM），避免超大分配常驻缓冲池
+        // A corrupted sample table can claim hundreds of MB or more; above the cap treat it as a read failure
+        // (libmov returns -ENOMEM) instead of a huge allocation that then stays in the buffer pool
+        static constexpr size_t kMaxSampleBytes = 32 * 1024 * 1024;
+        if (bytes > kMaxSampleBytes) {
+            WarnL << "mp4 demux sample too large, reject: file=" << ctx->thiz->_file_path << ", track=" << track_id
+                  << ", bytes=" << bytes << ", dts=" << dts;
+            return nullptr;
+        }
+
         ctx->buffer = ctx->thiz->_buffer_pool.obtain2();
         ctx->buffer->setCapacity(bytes + 1);
         ctx->buffer->setSize(bytes);
@@ -148,7 +160,7 @@ Frame::Ptr MP4Demuxer::readFrame(bool &keyFrame, bool &eof) {
 
         default : {
             eof = true;
-            WarnL << "读取mp4文件数据失败:" << ret;
+            WarnL << "读取mp4文件数据失败: file=" << _file_path << ", err=" << ret;
             return nullptr;
         }
     }

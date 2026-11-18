@@ -63,6 +63,14 @@ public:
                              "推流url,支持rtsp/rtmp",/*该选项说明文字*/
                              nullptr);
 
+                    (*_parser) << Option(0,
+                                 "stream-prefix",
+                                 Option::ArgRequired,
+                                 "",
+                                 false,
+                                 "推流 stream 后缀前缀；设置后 stream 名称固定为 <out>_<prefix>_<index>",
+                                 nullptr);
+
         (*_parser) << Option('c',/*该选项简称，如果是\x00则说明无简称*/
                              "count",/*该选项全称,每个选项必须有全称；不得为null或空字符串*/
                              Option::ArgRequired,/*该选项后面必须跟值*/
@@ -119,6 +127,7 @@ int main(int argc, char *argv[]) {
     logLevel = MIN(MAX(logLevel, LTrace), LError);
     auto in_url = cmd_main["in"];
     auto out_url = cmd_main["out"];
+    auto stream_prefix = cmd_main["stream-prefix"].as<string>();
     auto rtp_type = cmd_main["rtp"].as<int>();
     auto delay_ms = cmd_main["delay"].as<int>();
     auto pusher_count = cmd_main["count"].as<int>();
@@ -220,7 +229,8 @@ int main(int argc, char *argv[]) {
         (*pusher)[Client::kRtpType] = rtp_type;
         // 发起推流请求,每个推流端的stream_id都不一样  [AUTO-TRANSLATED:8b356fcb]
         // Initiate push stream request, each push stream end has a different stream_id
-        string url = StrPrinter << out_url << "_" << rand_str << "_" << index;
+        const auto &suffix = stream_prefix.empty() ? rand_str : stream_prefix;
+        string url = StrPrinter << out_url << "_" << suffix << "_" << index;
         pusher->publish(url);
 
         // 保持对象不销毁  [AUTO-TRANSLATED:650977d0]

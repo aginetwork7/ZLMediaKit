@@ -173,7 +173,9 @@ public:
     SignalingProtocols getSignalingProtocols() const { return _signaling_protocols; }
     void setSignalingProtocols(SignalingProtocols signaling_protocols) { _signaling_protocols = signaling_protocols; }
     // The session type is set by the signaling callback after the transport is registered, while
-    // the connection list API may read it from another thread.
+    // the connection list API may read it from another thread. Values (getWebRtcSessionType in
+    // WebRtcTransport.cpp): whep_player, whip_publisher, whip_batch_publisher, webrtc_api_player,
+    // webrtc_api_publisher, websocket_player, websocket_publisher, otherwise <source>_<type> or <type>.
     std::string getSessionType() const {
         std::lock_guard<std::mutex> lck(_session_type_mtx);
         return _session_type;

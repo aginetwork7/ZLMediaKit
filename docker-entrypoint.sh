@@ -62,7 +62,7 @@ if [ -n "${MEDIA_ALLOW_IP_RANGE:-}" ]; then
   allow_ip_range=$(printf '%s' "$MEDIA_ALLOW_IP_RANGE" | tr -d ' ')
   case "$allow_ip_range" in
     *[!0-9A-Fa-f.:,-]*)
-      echo "invalid MEDIA_ALLOW_IP_RANGE: $MEDIA_ALLOW_IP_RANGE" >&2
+      echo "invalid MEDIA_ALLOW_IP_RANGE: $MEDIA_ALLOW_IP_RANGE (expected comma-separated IPs or start-end ranges, e.g. 127.0.0.1,10.0.0.0-10.255.255.255; CIDR is not supported)" >&2
       exit 1
       ;;
   esac
@@ -78,5 +78,5 @@ exec /opt/media/bin/MediaServer \
   -c "$config_file" \
   --hook-base-url "$HOOK_BASE_URL" \
   --log-dir /opt/media/bin/log \
-  -l 0 \
+  -l 1 \
   "$@"

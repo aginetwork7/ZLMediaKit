@@ -48,11 +48,10 @@ BatchPublishSession::Ptr BatchPublishSessionManager::getSession(const string &ap
     return it->second;
 }
 
-bool BatchPublishSessionManager::getSourceBinding(const string &source_id, BatchPublishSession::SourceBinding &binding, string &session_key) const {
+bool BatchPublishSessionManager::getSourceBinding(const string &app, const string &source_id, BatchPublishSession::SourceBinding &binding) const {
     lock_guard<recursive_mutex> lck(_mtx);
     for (auto &it : _session_map) {
-        if (it.second && it.second->getSourceBinding(source_id, binding)) {
-            session_key = it.first;
+        if (it.second && it.second->getApp() == app && it.second->getSourceBinding(source_id, binding)) {
             return true;
         }
     }

@@ -76,7 +76,7 @@ public:
     bool initFromSdp(const RtcSession &answer_sdp, const std::string &rtsp_sdp);
 
     // Binds source_id to a free stream id, or returns the one it already holds (reused=true; a repeated
-    // bind only refreshes max_viewers). Returns false with a reason when the session is not active or
+    // bind refreshes max_viewers and lets a rejected source retry registration). Returns false with a reason when the session is not active or
     // no stream id is free.
     bool bindSource(const std::string &source_id, size_t max_viewers, std::string &stream_id, bool &reused, std::string &reason);
     // Releases source_id's stream id and unregisters its MediaSource. Idempotent: reused=true means
@@ -103,6 +103,7 @@ private:
     StreamContext *findStreamByMid(const std::string &mid);
     StreamContext *findStreamBySsrc(uint32_t ssrc, TrackType type);
     StreamContext *findStreamById(const std::string &stream_id);
+    Json::Value makeHeader() const;
     // Whether the stream got RTP of its bound source recently.
     static bool isReceiving(const StreamContext &ctx, uint64_t now_ms);
     bool allocFreeStreamId(std::string &stream_id);

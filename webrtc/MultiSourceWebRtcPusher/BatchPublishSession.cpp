@@ -133,8 +133,12 @@ bool BatchPublishSession::bindSource(const string &source_id, size_t max_viewers
     auto it = _source_bindings.find(source_id);
     if (it != _source_bindings.end()) {
         reused = true;
-        // A repeated bind refreshes the viewer limit.
+        // A repeated bind refreshes the viewer limit, and lets a source whose stream registration was
+        // rejected (e.g. the name was still held) try again on its next RTP.
         it->second.max_viewers = max_viewers;
+        if (_rejected_sources.erase(source_id)) {
+            InfoL << "batch source retry after rejection, app=" << _app << ", nvrId=" << _nvr_id << ", sourceId=" << source_id;
+        }
         stream_id = it->second.stream_id;
         reason = "reused";
         return true;
@@ -299,8 +303,8 @@ bool BatchPublishSession::onRtp(TrackType type, const string &mid, uint32_t ssrc
     return true;
 }
 
-Json::Value BatchPublishSession::getInfo() const {
-    lock_guard<recursive_mutex> lck(_mtx);
+// Fields shared by getInfo and getSummary; the caller holds _mtx.
+Json::Value BatchPublishSession::makeHeader() const {
     Json::Value data;
     data["app"] = _app;
     data["stream"] = _nvr_id;
@@ -308,6 +312,12 @@ Json::Value BatchPublishSession::getInfo() const {
     data["streamCount"] = (Json::UInt64)_stream_count;
     data["state"] = sessionStateToStr(_state);
     data["freeStreamCount"] = (Json::UInt64)_free_stream_ids.size();
+    return data;
+}
+
+Json::Value BatchPublishSession::getInfo() const {
+    lock_guard<recursive_mutex> lck(_mtx);
+    auto data = makeHeader();
 
     auto now_ms = toolkit::getCurrentMillisecond();
     Json::Value streams(Json::arrayValue);
@@ -352,13 +362,7 @@ Json::Value BatchPublishSession::getInfo() const {
 
 Json::Value BatchPublishSession::getSummary() const {
     lock_guard<recursive_mutex> lck(_mtx);
-    Json::Value data;
-    data["app"] = _app;
-    data["stream"] = _nvr_id;
-    data["transportId"] = _transport_id;
-    data["streamCount"] = (Json::UInt64)_stream_count;
-    data["state"] = sessionStateToStr(_state);
-    data["freeStreamCount"] = (Json::UInt64)_free_stream_ids.size();
+    auto data = makeHeader();
 
     Json::UInt64 bound_count = 0;
     Json::UInt64 receiving_count = 0;

@@ -85,6 +85,39 @@ using namespace Json;
 using namespace toolkit;
 using namespace mediakit;
 
+// Masks credential members at any depth: secret/token/authorization/cookie keys and "api.secret"
+// (getServerConfig returns the server config).
+static void redactJsonForLog(Json::Value &value) {
+    if (value.isArray()) {
+        for (auto &item : value) {
+            redactJsonForLog(item);
+        }
+        return;
+    }
+    if (!value.isObject()) {
+        return;
+    }
+    for (auto &key : value.getMemberNames()) {
+        auto lower = toLowerCopy(key);
+        if (isSecretQueryKey(key) || isSecretHeader(key) || lower == "api.secret") {
+            value[key] = kRedacted;
+        } else {
+            redactJsonForLog(value[key]);
+        }
+    }
+}
+
+// Response body for the api debug log: JSON responses are masked like request bodies.
+static std::string redactResponseForLog(const std::string &response) {
+    Json::Value root;
+    Json::Reader reader;
+    if (response.empty() || (response[0] != '{' && response[0] != '[') || !reader.parse(response, root)) {
+        return response;
+    }
+    redactJsonForLog(root);
+    return root.toStyledString();
+}
+
 // Request body for the api debug log, at most 4KB, with credentials masked in form and JSON bodies.
 static std::string redactBodyForLog(const Parser &parser) {
     static constexpr size_t kMaxLogBody = 4 * 1024;
@@ -100,11 +133,7 @@ static std::string redactBodyForLog(const Parser &parser) {
         if (!reader.parse(raw, root) || !root.isObject()) {
             return "<json, " + std::to_string(raw.size()) + " bytes>";
         }
-        for (auto &key : root.getMemberNames()) {
-            if (isSecretQueryKey(key) || isSecretHeader(key)) {
-                root[key] = kRedacted;
-            }
-        }
+        redactJsonForLog(root);
         auto content = root.toStyledString();
         return content.size() > kMaxLogBody ? content.substr(0, kMaxLogBody) : content;
     }
@@ -325,7 +354,7 @@ static inline void addHttpListener(){
 
                 if (size > 0 && size < 4 * 1024) {
                     auto response = body->readData(size);
-                    log << "# response:\r\n" << response->data() << "\r\n";
+                    log << "# response:\r\n" << redactResponseForLog(std::string(response->data(), response->size())) << "\r\n";
                     invoker(code, headerOut, response);
                 } else {
                     log << "# response size:" << size << "\r\n";

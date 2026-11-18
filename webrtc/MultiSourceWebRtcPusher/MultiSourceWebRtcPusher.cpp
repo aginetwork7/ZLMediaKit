@@ -170,7 +170,9 @@ void MultiSourceWebRtcPusher::onRecvRtp(MediaTrack &track, const string &rid, Rt
     auto mid = track.media ? track.media->mid : "";
     auto ok = _batch_session->onRtp(rtp->type, mid, rtp->getSSRC(), toolkit::getCurrentMillisecond(), rtp);
     if (!ok && _drop_warn_ticker.elapsedTime() > 2000) {
-        WarnL << "drop rtp for unbound stream, app=" << _media_info.app << ", nvrId=" << _media_info.stream
+        // onRtp drops RTP that maps to no stream, to a stream with no bound source, or to a source whose
+        // stream registration was rejected.
+        WarnL << "drop rtp: no stream, unbound stream or rejected source, app=" << _media_info.app << ", nvrId=" << _media_info.stream
               << ", mid=" << mid << ", ssrc=" << rtp->getSSRC();
         _drop_warn_ticker.resetTime();
     }

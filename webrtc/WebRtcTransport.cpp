@@ -1872,8 +1872,7 @@ static constexpr size_t kDefaultBatchMaxViewers = 16;
 // Returns the WHEP viewer limit of a batch-published source, or 0 if the stream is not batch-published.
 static size_t getBatchViewerLimit(const MediaInfo &info) {
     BatchPublishSession::SourceBinding binding;
-    string session_key;
-    if (!BatchPublishSessionManager::Instance().getSourceBinding(info.stream, binding, session_key) || binding.play_app != info.app) {
+    if (!BatchPublishSessionManager::Instance().getSourceBinding(info.app, info.stream, binding)) {
         return 0;
     }
     return binding.max_viewers ? binding.max_viewers : kDefaultBatchMaxViewers;

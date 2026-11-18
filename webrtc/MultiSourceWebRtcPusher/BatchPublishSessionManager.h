@@ -31,7 +31,8 @@ public:
     // Removes the session only if it is still the registered one for app/nvr_id.
     void removeSession(const std::string &app, const std::string &nvr_id, const BatchPublishSession::Ptr &session);
     BatchPublishSession::Ptr getSession(const std::string &app, const std::string &nvr_id) const;
-    bool getSourceBinding(const std::string &source_id, BatchPublishSession::SourceBinding &binding, std::string &session_key) const;
+    // Finds the binding of the source published as app/source_id by any batch session of that app.
+    bool getSourceBinding(const std::string &app, const std::string &source_id, BatchPublishSession::SourceBinding &binding) const;
 
     Json::Value getSessionInfo(const std::string &app, const std::string &nvr_id) const;
     Json::Value getSessionSummary(const std::string &app, const std::string &nvr_id) const;

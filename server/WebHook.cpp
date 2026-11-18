@@ -155,29 +155,37 @@ string to_string(const HttpArgs &value) {
     return value.make();
 }
 
-// Hook body for logs: the player/device JWT ("authorization"), the media token in "params" and the API
-// secret in the server config are masked.
+// Hook body for logs. Fields masked whole: the player/device JWT ("authorization") and the API secret
+// that on_server_started/on_server_keepalive carry with the server config. "params" (the play/publish
+// url query) keeps its other values, only its media token is masked.
+// A function, not a static array: API::kSecret is defined in another translation unit.
+static const std::vector<std::string> &hookSecretFields() {
+    static const std::vector<std::string> fields { "authorization", API::kSecret };
+    return fields;
+}
+static constexpr char kHookParamsField[] = "params";
+
 static string to_log_string(Value value) {
-    if (value.isMember("authorization")) {
-        value["authorization"] = kRedacted;
-    }
-    // on_server_started/on_server_keepalive carry the server config.
-    if (value.isMember(API::kSecret)) {
-        value[API::kSecret] = kRedacted;
+    for (auto &field : hookSecretFields()) {
+        if (value.isMember(field)) {
+            value[field] = kRedacted;
+        }
     }
     // isMember first: operator[] on a missing key would add "params": null to the logged body.
-    if (value.isMember("params") && value["params"].isString()) {
-        value["params"] = redactQuery(value["params"].asString());
+    if (value.isMember(kHookParamsField) && value[kHookParamsField].isString()) {
+        value[kHookParamsField] = redactQuery(value[kHookParamsField].asString());
     }
     return to_string(value);
 }
 
 static string to_log_string(HttpArgs value) {
-    if (value.find("authorization") != value.end()) {
-        value["authorization"] = kRedacted;
+    for (auto &field : hookSecretFields()) {
+        if (value.find(field) != value.end()) {
+            value[field] = kRedacted;
+        }
     }
-    if (value.find("params") != value.end()) {
-        value["params"] = redactQuery(value["params"]);
+    if (value.find(kHookParamsField) != value.end()) {
+        value[kHookParamsField] = redactQuery(value[kHookParamsField]);
     }
     return to_string(value);
 }
@@ -214,7 +222,6 @@ void do_http_hook(const string &url, const ArgsType &body, const function<void(c
     auto requester = std::make_shared<HttpRequester>();
     requester->setMethod("POST");
     auto bodyStr = to_string(body);
-    auto logBodyStr = to_log_string(body);
     requester->setBody(bodyStr);
     requester->addHeader("Content-Type", getContentType(body));
     auto vhost = getVhost(body);
@@ -222,13 +229,14 @@ void do_http_hook(const string &url, const ArgsType &body, const function<void(c
         requester->addHeader("X-VHOST", vhost);
     }
     Ticker ticker;
-    requester->startRequester(url, [url, func, logBodyStr, body, requester, ticker, retry](const SockException &ex, const Parser &res) mutable {
+    // The masked body is built only when a failure or slow hook is logged.
+    requester->startRequester(url, [url, func, body, requester, ticker, retry](const SockException &ex, const Parser &res) mutable {
         onceToken token(nullptr, [&]() mutable { requester.reset(); });
         parse_http_response(ex, res, [&](const Value &obj, const string &err, bool should_retry) {
             if (!err.empty()) {
                 // hook失败  [AUTO-TRANSLATED:68231f46]
                 // Hook failed
-                WarnL << "hook " << url << " " << ticker.elapsedTime() << "ms,failed" << err << ":" << logBodyStr;
+                WarnL << "hook " << url << " " << ticker.elapsedTime() << "ms,failed" << err << ":" << to_log_string(body);
 
                 if (retry-- > 0 && should_retry) {
                     requester->getPoller()->doDelayTask(MAX(retry_delay, 0.0) * 1000, [url, body, func, retry] {
@@ -243,7 +251,7 @@ void do_http_hook(const string &url, const ArgsType &body, const function<void(c
             } else if (ticker.elapsedTime() > 500) {
                 // hook成功，但是hook响应超过500ms，打印警告日志  [AUTO-TRANSLATED:e03557aa]
                 // Hook succeeded, but hook response exceeded 500ms, print warning log
-                DebugL << "hook " << url << " " << ticker.elapsedTime() << "ms,success:" << logBodyStr;
+                DebugL << "hook " << url << " " << ticker.elapsedTime() << "ms,success:" << to_log_string(body);
             }
 
             if (func) {

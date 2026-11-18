@@ -364,6 +364,11 @@ public:
         if (key == "session_source") {
             return _session_source;
         }
+        if (key == "Authorization") {
+            // Forwarded to the publish/play hooks as the caller's identity: only the header counts, a
+            // query parameter of the same name must not replace it.
+            return getValue(_args.getParser().getHeader(), key);
+        }
         return _args[key];
     }
 

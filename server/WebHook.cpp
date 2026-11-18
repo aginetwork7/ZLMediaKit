@@ -155,12 +155,18 @@ string to_string(const HttpArgs &value) {
     return value.make();
 }
 
-// Hook body for logs: the player/device JWT ("authorization") and the media token in "params" are masked.
+// Hook body for logs: the player/device JWT ("authorization"), the media token in "params" and the API
+// secret in the server config are masked.
 static string to_log_string(Value value) {
     if (value.isMember("authorization")) {
         value["authorization"] = kRedacted;
     }
-    if (value["params"].isString()) {
+    // on_server_started/on_server_keepalive carry the server config.
+    if (value.isMember(API::kSecret)) {
+        value[API::kSecret] = kRedacted;
+    }
+    // isMember first: operator[] on a missing key would add "params": null to the logged body.
+    if (value.isMember("params") && value["params"].isString()) {
         value["params"] = redactQuery(value["params"].asString());
     }
     return to_string(value);
@@ -264,9 +270,9 @@ ArgsType make_json(const MediaInfo &args) {
     }
     dumpMediaTuple(args, body);
     body["params"] = args.params;
-	if (!args.authorization.empty()) {
-		body["authorization"] = args.authorization;
-	}
+    if (!args.authorization.empty()) {
+        body["authorization"] = args.authorization;
+    }
     return body;
 }
 

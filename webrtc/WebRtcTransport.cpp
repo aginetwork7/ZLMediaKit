@@ -1306,17 +1306,14 @@ void WebRtcTransportImp::onRtcp(const char *buf, size_t len) {
             auto it = _ssrc_to_track.find(sr->ssrc);
             if (it != _ssrc_to_track.end()) {
                 auto &track = it->second;
+                // SR of an unknown ssrc is ignored without a log: it would flood the log on every report.
                 auto rtp_chn = track->getRtpChannel(sr->ssrc);
-                if (!rtp_chn) {
-                    //WarnL << "未识别的sr rtcp包:" << rtcp->dumpString();
-                } else {
+                if (rtp_chn) {
                     // 设置rtp时间戳与ntp时间戳的对应关系  [AUTO-TRANSLATED:e92f4749]
                     // Set the correspondence between rtp timestamp and ntp timestamp
                     rtp_chn->setNtpStamp(sr->rtpts, sr->getNtpUnixStampMS());
                     rtp_chn->onRtcp(sr);
                 }
-            } else {
-                //WarnL << "未识别的sr rtcp包:" << rtcp->dumpString();
             }
             break;
         }
@@ -1874,8 +1871,7 @@ static size_t getBatchViewerLimit(const MediaInfo &info) {
     return binding.max_viewers ? binding.max_viewers : kDefaultBatchMaxViewers;
 }
 
-// Counts WHEP players of the stream, including ones still negotiating.
-static size_t countWebRtcPlayers(const MediaInfo &info) {
+size_t countWebRtcPlayers(const std::string &vhost, const std::string &app, const std::string &stream) {
     size_t count = 0;
     for (auto &transport : WebRtcTransportManager::Instance().getItems()) {
         auto player = dynamic_pointer_cast<WebRtcPlayer>(transport);
@@ -1883,23 +1879,32 @@ static size_t countWebRtcPlayers(const MediaInfo &info) {
             continue;
         }
         auto player_info = player->getMediaInfo();
-        if (player_info.vhost == info.vhost && player_info.app == info.app && player_info.stream == info.stream) {
+        if (player_info.vhost == vhost && player_info.app == app && player_info.stream == stream) {
             ++count;
         }
     }
     return count;
 }
 
+static size_t countWebRtcPlayers(const MediaInfo &info) {
+    return countWebRtcPlayers(info.vhost, info.app, info.stream);
+}
+
 template<typename Type>
 void play_plugin(SocketHelper &sender, const WebRtcArgs &args, const onCreateWebRtc &cb) {
 
     MediaInfo info(args["url"]);
-	info.authorization = args["Authorization"].data();
+    info.authorization = args["Authorization"].data();
     // Reject before the play hook so leaked play URLs cannot exceed the limit.
     auto viewer_limit = getBatchViewerLimit(info);
-    if (viewer_limit && countWebRtcPlayers(info) >= viewer_limit) {
-        cb(WebRtcException(SockException(Err_other, "viewerLimit")));
-        return;
+    if (viewer_limit) {
+        auto viewer_count = countWebRtcPlayers(info);
+        if (viewer_count >= viewer_limit) {
+            WarnL << "reject whep: viewerLimit, app=" << info.app << ", stream=" << info.stream << ", limit=" << viewer_limit
+                  << ", count=" << viewer_count;
+            cb(WebRtcException(SockException(Err_other, "viewerLimit")));
+            return;
+        }
     }
     auto session_ptr = static_pointer_cast<Session>(sender.shared_from_this());
     Broadcast::AuthInvoker invoker = [cb, info, session_ptr](const string &err) mutable {
@@ -1925,8 +1930,11 @@ void play_plugin(SocketHelper &sender, const WebRtcArgs &args, const onCreateWeb
             std::unique_lock<std::mutex> viewer_lck(s_viewer_limit_mtx, std::defer_lock);
             if (auto limit = getBatchViewerLimit(info)) {
                 viewer_lck.lock();
-                if (countWebRtcPlayers(info) >= limit) {
+                auto viewer_count = countWebRtcPlayers(info);
+                if (viewer_count >= limit) {
                     viewer_lck.unlock();
+                    WarnL << "reject whep: viewerLimit, app=" << info.app << ", stream=" << info.stream << ", limit=" << limit
+                          << ", count=" << viewer_count;
                     cb(WebRtcException(SockException(Err_other, "viewerLimit")));
                     return;
                 }

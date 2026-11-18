@@ -2029,8 +2029,9 @@ Json::Value IceAgent::getSelectedPairInfo() const {
         return result;
     }
 
-    auto network_type = _selected_pair->_socket && _selected_pair->_socket->getSock()
-        && _selected_pair->_socket->getSock()->sockType() == SockNum::Sock_TCP ? "tcp" : "udp";
+    auto &socket = _selected_pair->_socket;
+    auto uses_tcp = socket && socket->getSock() && socket->getSock()->sockType() == SockNum::Sock_TCP;
+    auto network_type = uses_tcp ? "tcp" : "udp";
     auto state = string("completed");
     auto local_type = string("host");
     auto remote_type = string("host");

@@ -26,7 +26,7 @@ BatchPublishSession::Ptr BatchPublishSessionManager::replaceSession(const BatchP
     slot = session;
     if (old) {
         // Release the old sources before the new session can register the same app/sourceId.
-        old->clearAllSource();
+        old->clearAllSources();
     }
     return old;
 }

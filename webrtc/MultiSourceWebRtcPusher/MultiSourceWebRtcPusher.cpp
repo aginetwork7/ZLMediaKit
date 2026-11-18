@@ -17,6 +17,8 @@ using namespace toolkit;
 
 namespace mediakit {
 
+// DataChannel RPC between the edge and this pusher (whip.bind / whip.unbind requests and their
+// replies); the contract is in the PushPull design doc, zlm_whip_batch_design.md section 5.
 namespace {
 constexpr int kCodeSuccess = 0;
 constexpr int kCodeOtherFailed = -1;
@@ -45,8 +47,8 @@ MultiSourceWebRtcPusher::MultiSourceWebRtcPusher(const EventPoller::Ptr &poller,
                                                  const MediaInfo &info,
                                                  const ProtocolOption &option)
     : WebRtcTransportImp(poller)
-    , _media_info(info)
-    , _option(option) {
+    , _media_info(info) {
+    // ProtocolOption does not apply to the batch's sources: each one is a plain RtspMediaSource.
 }
 
 const MediaInfo &MultiSourceWebRtcPusher::getMediaInfo() const {
@@ -109,7 +111,7 @@ float MultiSourceWebRtcPusher::getLossRate(MediaSource &sender, TrackType type) 
 
 void MultiSourceWebRtcPusher::onDestory() {
     if (_batch_session) {
-        _batch_session->clearAllSource();
+        _batch_session->clearAllSources();
         BatchPublishSessionManager::Instance().removeSession(_batch_session->getApp(), _batch_session->getNvrId(), _batch_session);
         InfoL << "batch session closed, app=" << _batch_session->getApp() << ", nvrId=" << _batch_session->getNvrId()
               << ", transportId=" << getIdentifier();
@@ -130,6 +132,9 @@ void MultiSourceWebRtcPusher::onCheckSdp(SdpType type, RtcSession &sdp) {
         if (m.type == TrackApplication) {
             continue;
         }
+        // RTP is routed to its stream by SSRC: without a=ssrc every m-line of the same payload type
+        // maps to the first one, and the RTP of all sources would be written to stream 0.
+        CHECK(m.getRtpSSRC(), "batch offer requires a=ssrc on every audio/video m-line, mid=", m.mid);
         if (expect_audio) {
             CHECK(m.type == TrackAudio, "batch offer layout invalid, expect audio then video");
             expect_audio = false;
@@ -164,13 +169,10 @@ void MultiSourceWebRtcPusher::onRecvRtp(MediaTrack &track, const string &rid, Rt
 
     auto mid = track.media ? track.media->mid : "";
     auto ok = _batch_session->onRtp(rtp->type, mid, rtp->getSSRC(), toolkit::getCurrentMillisecond(), rtp);
-    if (!ok) {
-        static toolkit::Ticker s_warn_ticker;
-        if (s_warn_ticker.elapsedTime() > 2000) {
-            WarnL << "drop rtp for unbound stream, app=" << _media_info.app << ", nvrId=" << _media_info.stream
-                  << ", mid=" << mid << ", ssrc=" << rtp->getSSRC();
-            s_warn_ticker.resetTime();
-        }
+    if (!ok && _drop_warn_ticker.elapsedTime() > 2000) {
+        WarnL << "drop rtp for unbound stream, app=" << _media_info.app << ", nvrId=" << _media_info.stream
+              << ", mid=" << mid << ", ssrc=" << rtp->getSSRC();
+        _drop_warn_ticker.resetTime();
     }
 }
 
@@ -186,36 +188,48 @@ void MultiSourceWebRtcPusher::OnSctpAssociationMessageReceived(RTC::SctpAssociat
         return;
     }
 
-    Json::Value root;
-    Json::Reader reader;
-    auto body = string((const char *)msg, len);
-    if (!reader.parse(body, root)) {
-        sendReply("", "", "", "", streamId, ppid, kCodeInvalidArgs, "invalidPayload");
-        return;
-    }
-
-    auto request_id = root["id"].asString();
-    auto act = root["act"].asString();
-    if (!_batch_session) {
-        sendReply(act, request_id, "", "", streamId, ppid, kCodeNotFound, "sessionNotFound");
-        return;
-    }
-
+    // This runs on usrsctp's receive callback: no exception may leave it.
+    string request_id;
+    string act;
     try {
-    if (act == "whip.bind") {
-        handleBind(root, request_id, streamId, ppid);
-        return;
-    }
-    if (act == "whip.unbind") {
-        handleUnbind(root, request_id, streamId, ppid);
-        return;
-    }
+        Json::Value root;
+        Json::Reader reader;
+        auto body = string((const char *)msg, len);
+        if (!reader.parse(body, root) || !root.isObject()) {
+            WarnL << "batch datachannel invalid payload, app=" << _media_info.app << ", nvrId=" << _media_info.stream
+                  << ", size=" << len;
+            sendReply("", "", "", "", streamId, ppid, kCodeInvalidArgs, "invalidPayload");
+            return;
+        }
 
-    sendReply(act, request_id, "", "", streamId, ppid, kCodeInvalidArgs, "invalidAct");
+        request_id = root["id"].isString() ? root["id"].asString() : "";
+        act = root["act"].isString() ? root["act"].asString() : "";
+        if (!_batch_session) {
+            sendReply(act, request_id, "", "", streamId, ppid, kCodeNotFound, "sessionNotFound");
+            return;
+        }
+        if (!root["data"].isObject()) {
+            sendReply(act, request_id, "", "", streamId, ppid, kCodeInvalidArgs, "invalidData");
+            return;
+        }
+        if (act == "whip.bind") {
+            handleBind(root, request_id, streamId, ppid);
+            return;
+        }
+        if (act == "whip.unbind") {
+            handleUnbind(root, request_id, streamId, ppid);
+            return;
+        }
+
+        WarnL << "batch datachannel invalid act, app=" << _media_info.app << ", nvrId=" << _media_info.stream << ", act=" << act;
+        sendReply(act, request_id, "", "", streamId, ppid, kCodeInvalidArgs, "invalidAct");
     } catch (std::exception &ex) {
         WarnL << "batch datachannel handle exception, app=" << _media_info.app << ", nvrId=" << _media_info.stream
               << ", act=" << act << ", err=" << ex.what();
-        sendReply(act, request_id, "", "", streamId, ppid, kCodeException, "internalException");
+        try {
+            sendReply(act, request_id, "", "", streamId, ppid, kCodeException, "internalException");
+        } catch (...) {
+        }
     }
 }
 #endif
@@ -224,30 +238,21 @@ void MultiSourceWebRtcPusher::handleBind(const Json::Value &root,
                                         const string &request_id,
                                         uint16_t dc_stream_id,
                                         uint32_t ppid) {
-    auto data = root["data"];
-    auto nvr_id = data["nvrId"].asString();
-    auto source_id = data["sourceId"].asString();
+    auto &data = root["data"];
+    string source_id;
+    if (!checkSourceArgs("whip.bind", data, request_id, dc_stream_id, ppid, source_id)) {
+        return;
+    }
     // 0 means the default WHEP viewer limit.
     auto max_viewers = data["maxViewers"].isUInt() ? (size_t)data["maxViewers"].asUInt() : 0;
-
-    if (nvr_id.empty()) {
-        sendReply("whip.bind", request_id, source_id, "", dc_stream_id, ppid, kCodeInvalidArgs, "invalidNvrId");
-        return;
-    }
-    if (source_id.empty()) {
-        sendReply("whip.bind", request_id, source_id, "", dc_stream_id, ppid, kCodeInvalidArgs, "invalidSourceId");
-        return;
-    }
-    if (nvr_id != _media_info.stream) {
-        sendReply("whip.bind", request_id, source_id, "", dc_stream_id, ppid, kCodeInvalidArgs, "invalidNvrId");
-        return;
-    }
 
     string stream_id;
     string reason;
     bool reused = false;
     auto ok = _batch_session->bindSource(source_id, max_viewers, stream_id, reused, reason);
     if (!ok) {
+        WarnL << "whip.bind failed, app=" << _media_info.app << ", nvrId=" << _media_info.stream << ", sourceId=" << source_id
+              << ", reason=" << reason;
         sendReply("whip.bind", request_id, source_id, "", dc_stream_id, ppid, kCodeOtherFailed,
                   reason.empty() ? "noAvailableStreamId" : reason);
         return;
@@ -260,32 +265,38 @@ void MultiSourceWebRtcPusher::handleUnbind(const Json::Value &root,
                                           const string &request_id,
                                           uint16_t dc_stream_id,
                                           uint32_t ppid) {
-    auto data = root["data"];
-    auto nvr_id = data["nvrId"].asString();
-    auto source_id = data["sourceId"].asString();
-
-    if (nvr_id.empty()) {
-        sendReply("whip.unbind", request_id, source_id, "", dc_stream_id, ppid, kCodeInvalidArgs, "invalidNvrId");
-        return;
-    }
-    if (source_id.empty()) {
-        sendReply("whip.unbind", request_id, source_id, "", dc_stream_id, ppid, kCodeInvalidArgs, "invalidSourceId");
-        return;
-    }
-    if (nvr_id != _media_info.stream) {
-        sendReply("whip.unbind", request_id, source_id, "", dc_stream_id, ppid, kCodeInvalidArgs, "invalidNvrId");
+    string source_id;
+    if (!checkSourceArgs("whip.unbind", root["data"], request_id, dc_stream_id, ppid, source_id)) {
         return;
     }
 
     string stream_id;
     bool reused = false;
-    auto ok = _batch_session->unbindSource(source_id, stream_id, reused);
-    if (!ok) {
-        sendReply("whip.unbind", request_id, source_id, "", dc_stream_id, ppid, kCodeOtherFailed, "internalException");
-        return;
-    }
-
+    _batch_session->unbindSource(source_id, stream_id, reused);
     sendReply("whip.unbind", request_id, source_id, stream_id, dc_stream_id, ppid, kCodeSuccess, reused ? "reused" : "");
+}
+
+bool MultiSourceWebRtcPusher::checkSourceArgs(const string &act,
+                                              const Json::Value &data,
+                                              const string &request_id,
+                                              uint16_t dc_stream_id,
+                                              uint32_t ppid,
+                                              string &source_id) {
+    auto nvr_id = data["nvrId"].isString() ? data["nvrId"].asString() : "";
+    source_id = data["sourceId"].isString() ? data["sourceId"].asString() : "";
+    const char *reason = nullptr;
+    if (nvr_id.empty() || nvr_id != _media_info.stream) {
+        reason = "invalidNvrId";
+    } else if (source_id.empty()) {
+        reason = "invalidSourceId";
+    }
+    if (!reason) {
+        return true;
+    }
+    WarnL << act << " rejected, app=" << _media_info.app << ", nvrId=" << _media_info.stream << ", requestNvrId=" << nvr_id
+          << ", sourceId=" << source_id << ", reason=" << reason;
+    sendReply(act, request_id, source_id, "", dc_stream_id, ppid, kCodeInvalidArgs, reason);
+    return false;
 }
 
 void MultiSourceWebRtcPusher::sendReply(const string &act,

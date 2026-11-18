@@ -47,6 +47,14 @@ void WebRtcTalk::onStartWebRTC() {
         onShutdown(SockException(Err_shutdown, "rtsp media source was shutdown"));
         return;
     }
+    // Talk sends the voice through the source's muxer; some sources (such as the ones of a batch
+    // publisher) have none.
+    auto muxer = playSrc->getMuxer();
+    if (!muxer) {
+        WarnL << "talk not supported on this source: " << playSrc->getUrl();
+        onShutdown(SockException(Err_other, "talk not supported on this source"));
+        return;
+    }
     WebRtcTransportImp::onStartWebRTC();
     // 不支持simulcast
     CHECK(!_answer_sdp->supportSimulcast());
@@ -74,7 +82,7 @@ void WebRtcTalk::onStartWebRTC() {
 
     std::weak_ptr<WebRtcTalk> weak_self = static_pointer_cast<WebRtcTalk>(shared_from_this());
     _sender = std::make_shared<RtpSender>(getPoller());
-    _sender->startSend(*(playSrc->getMuxer()), args, [weak_self](uint16_t local_port, const SockException &ex) {
+    _sender->startSend(*muxer, args, [weak_self](uint16_t local_port, const SockException &ex) {
         if (!ex) {
             return;
         }

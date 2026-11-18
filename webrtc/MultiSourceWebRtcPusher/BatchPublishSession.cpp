@@ -11,14 +11,19 @@
 #include "BatchPublishSession.h"
 
 #include <algorithm>
+#include <cctype>
 
 #include "Common/MediaSource.h"
 #include "Rtsp/Rtsp.h"
 #include "Util/logger.h"
+#include "Util/util.h"
 
 using namespace std;
 
 namespace mediakit {
+
+// A stream that got no RTP of its source for this long is no longer reported as receiving.
+static constexpr uint64_t kReceivingTimeoutMs = 5000;
 
 BatchPublishSession::BatchPublishSession(string app, string nvr_id, string transport_id, size_t stream_count)
     : _app(std::move(app))
@@ -155,7 +160,6 @@ bool BatchPublishSession::bindSource(const string &source_id, size_t max_viewers
     binding.play_app = _app;
     binding.play_stream = source_id;
     binding.stream_id = stream_id;
-    binding.online = true;
     binding.max_viewers = max_viewers;
     _source_bindings[source_id] = std::move(binding);
 
@@ -163,14 +167,14 @@ bool BatchPublishSession::bindSource(const string &source_id, size_t max_viewers
     return true;
 }
 
-bool BatchPublishSession::unbindSource(const string &source_id, string &stream_id, bool &reused) {
+void BatchPublishSession::unbindSource(const string &source_id, string &stream_id, bool &reused) {
     lock_guard<recursive_mutex> lck(_mtx);
     reused = false;
 
     auto it = _source_bindings.find(source_id);
     if (it == _source_bindings.end()) {
         reused = true;
-        return true;
+        return;
     }
 
     stream_id = it->second.stream_id;
@@ -178,19 +182,16 @@ bool BatchPublishSession::unbindSource(const string &source_id, string &stream_i
 
     auto ctx = findStreamById(stream_id);
     if (ctx) {
-        ctx->state = StreamState::Reclaiming;
         ctx->current_source_id.clear();
         ctx->receiving = false;
         ctx->state = StreamState::Idle;
     }
 
     releaseStreamId(stream_id);
-
     releaseSource(source_id);
-    return true;
 }
 
-void BatchPublishSession::clearAllSource() {
+void BatchPublishSession::clearAllSources() {
     lock_guard<recursive_mutex> lck(_mtx);
     _state = SessionState::Closing;
     _source_bindings.clear();
@@ -210,8 +211,8 @@ void BatchPublishSession::clearAllSource() {
     _state = SessionState::Closed;
 }
 
-// The edge publishes its packed frames (start code 00 00 00 01, then a ref byte and a flag byte
-// that both carry 0x20 on a key frame) as VP8 RTP payloads. Only the packet that starts a frame
+// The edge publishes its packed frames as VP8 RTP payloads: start code 00 00 00 01, then a ref byte
+// with 0x20 set and a flag byte with both 0x20 and 0x80 set (& 0xA0 == 0xA0) on a key frame. Only the packet that starts a frame
 // (S=1, PID=0) is checked. Encrypted payloads never set the bits, so they have no key frames.
 static bool isEdgeKeyFrameStart(const RtpPacket::Ptr &rtp) {
     auto payload = rtp->getPayload();
@@ -269,13 +270,14 @@ bool BatchPublishSession::onRtp(TrackType type, const string &mid, uint32_t ssrc
         _video_ssrc_to_stream[ssrc] = ctx->stream_id;
     }
 
-    ctx->last_rtp_ms = stamp_ms;
-    ctx->receiving = true;
-    ctx->state = StreamState::Receiving;
-
+    // RTP on a stream with no (usable) source is dropped and does not count as receiving.
     if (ctx->current_source_id.empty() || _rejected_sources.count(ctx->current_source_id)) {
         return false;
     }
+
+    ctx->last_rtp_ms = stamp_ms;
+    ctx->receiving = true;
+    ctx->state = StreamState::Receiving;
 
     auto src = getOrCreateSource(ctx->current_source_id);
     if (!src) {
@@ -307,8 +309,10 @@ Json::Value BatchPublishSession::getInfo() const {
     data["state"] = sessionStateToStr(_state);
     data["freeStreamCount"] = (Json::UInt64)_free_stream_ids.size();
 
+    auto now_ms = toolkit::getCurrentMillisecond();
     Json::Value streams(Json::arrayValue);
     for (auto &ctx : _streams) {
+        auto receiving = isReceiving(ctx, now_ms);
         Json::Value item;
         item["streamId"] = ctx.stream_id;
         item["audioMid"] = ctx.audio_mid;
@@ -316,8 +320,9 @@ Json::Value BatchPublishSession::getInfo() const {
         item["audioSsrc"] = (Json::UInt64)ctx.audio_ssrc;
         item["videoSsrc"] = (Json::UInt64)ctx.video_ssrc;
         item["sourceId"] = ctx.current_source_id;
-        item["receiving"] = ctx.receiving;
-        item["state"] = streamStateToStr(ctx.state);
+        item["receiving"] = receiving;
+        // A source that stopped sending is reported as bound until RTP comes again.
+        item["state"] = streamStateToStr(ctx.state == StreamState::Receiving && !receiving ? StreamState::Bound : ctx.state);
         streams.append(item);
     }
 
@@ -328,7 +333,8 @@ Json::Value BatchPublishSession::getInfo() const {
         item["streamId"] = it.second.stream_id;
         item["playApp"] = it.second.play_app;
         item["playStream"] = it.second.play_stream;
-        item["online"] = it.second.online;
+        // A binding exists only while its source is online.
+        item["online"] = true;
         item["maxViewers"] = (Json::UInt64)it.second.max_viewers;
         sources.append(item);
     }
@@ -356,11 +362,12 @@ Json::Value BatchPublishSession::getSummary() const {
 
     Json::UInt64 bound_count = 0;
     Json::UInt64 receiving_count = 0;
+    auto now_ms = toolkit::getCurrentMillisecond();
     for (const auto &stream : _streams) {
         if (stream.state == StreamState::Bound || stream.state == StreamState::Receiving) {
             ++bound_count;
         }
-        if (stream.receiving) {
+        if (isReceiving(stream, now_ms)) {
             ++receiving_count;
         }
     }
@@ -401,10 +408,6 @@ const string &BatchPublishSession::getTransportId() const {
     return _transport_id;
 }
 
-BatchPublishSession::SessionState BatchPublishSession::getState() const {
-    return _state;
-}
-
 shared_ptr<RtspMediaSourceImp> BatchPublishSession::getOrCreateSource(const string &source_id) {
     auto it = _source_map.find(source_id);
     if (it != _source_map.end()) {
@@ -443,22 +446,23 @@ BatchPublishSession::StreamContext *BatchPublishSession::findStreamByMid(const s
     if (it == _mid_to_stream.end()) {
         return nullptr;
     }
-    auto &stream_id = it->second;
-    for (auto &ctx : _streams) {
-        if (ctx.stream_id == stream_id) {
-            return &ctx;
-        }
-    }
-    return nullptr;
+    return findStreamById(it->second);
 }
 
+// A stream id is the index of its stream in _streams (see initFromSdp).
 BatchPublishSession::StreamContext *BatchPublishSession::findStreamById(const string &stream_id) {
-    for (auto &ctx : _streams) {
-        if (ctx.stream_id == stream_id) {
-            return &ctx;
-        }
+    if (stream_id.empty() || stream_id.size() > 4 || !all_of(stream_id.begin(), stream_id.end(), [](unsigned char c) { return isdigit(c); })) {
+        return nullptr;
     }
-    return nullptr;
+    auto index = (size_t)stoul(stream_id);
+    if (index >= _streams.size() || _streams[index].stream_id != stream_id) {
+        return nullptr;
+    }
+    return &_streams[index];
+}
+
+bool BatchPublishSession::isReceiving(const StreamContext &ctx, uint64_t now_ms) {
+    return ctx.receiving && now_ms - ctx.last_rtp_ms < kReceivingTimeoutMs;
 }
 
 BatchPublishSession::StreamContext *BatchPublishSession::findStreamBySsrc(uint32_t ssrc, TrackType type) {
@@ -467,13 +471,7 @@ BatchPublishSession::StreamContext *BatchPublishSession::findStreamBySsrc(uint32
     if (it == map->end()) {
         return nullptr;
     }
-    auto &stream_id = it->second;
-    for (auto &ctx : _streams) {
-        if (ctx.stream_id == stream_id) {
-            return &ctx;
-        }
-    }
-    return nullptr;
+    return findStreamById(it->second);
 }
 
 bool BatchPublishSession::allocFreeStreamId(string &stream_id) {
@@ -508,7 +506,6 @@ const char *BatchPublishSession::streamStateToStr(StreamState state) {
         case StreamState::Idle: return "Idle";
         case StreamState::Bound: return "Bound";
         case StreamState::Receiving: return "Receiving";
-        case StreamState::Reclaiming: return "Reclaiming";
         default: return "Unknown";
     }
 }

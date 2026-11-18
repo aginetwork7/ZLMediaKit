@@ -18,10 +18,10 @@ inline std::string toLowerCopy(std::string str) {
     return str;
 }
 
-// Query keys whose values are credentials: media tokens and the API secret.
+// Keys whose values are credentials: media tokens, the API secret and a JWT passed as a parameter.
 inline bool isSecretQueryKey(const std::string &key) {
     auto lower = toLowerCopy(key);
-    return lower == "token" || lower == "secret";
+    return lower == "token" || lower == "secret" || lower == "authorization";
 }
 
 // Headers whose values are credentials.

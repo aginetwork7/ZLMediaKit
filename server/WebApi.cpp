@@ -85,6 +85,32 @@ using namespace Json;
 using namespace toolkit;
 using namespace mediakit;
 
+// Request body for the api debug log, at most 4KB, with credentials masked in form and JSON bodies.
+static std::string redactBodyForLog(const Parser &parser) {
+    static constexpr size_t kMaxLogBody = 4 * 1024;
+    auto &raw = parser.content();
+    auto content_type = toLowerCopy(parser["Content-Type"]);
+    if (content_type.find("urlencoded") != std::string::npos) {
+        // Truncating first cannot reveal a value: a key cut before its '=' carries none.
+        return redactQuery(raw.size() > kMaxLogBody ? raw.substr(0, kMaxLogBody) : raw);
+    }
+    if (content_type.find("json") != std::string::npos) {
+        Json::Value root;
+        Json::Reader reader;
+        if (!reader.parse(raw, root) || !root.isObject()) {
+            return "<json, " + std::to_string(raw.size()) + " bytes>";
+        }
+        for (auto &key : root.getMemberNames()) {
+            if (isSecretQueryKey(key) || isSecretHeader(key)) {
+                root[key] = kRedacted;
+            }
+        }
+        auto content = root.toStyledString();
+        return content.size() > kMaxLogBody ? content.substr(0, kMaxLogBody) : content;
+    }
+    return raw.size() > kMaxLogBody ? raw.substr(0, kMaxLogBody) : raw;
+}
+
 namespace API {
 #define API_FIELD "api."
 const string kApiDebug = API_FIELD"apiDebug";
@@ -295,11 +321,7 @@ static inline void addHttpListener(){
                     log << pr.first << " : " << (isSecretHeader(pr.first) ? kRedacted : pr.second) << "\r\n";
                 }
 
-                auto content = parser.content();
-                if (toLowerCopy(parser["Content-Type"]).find("urlencoded") != std::string::npos) {
-                    content = redactQuery(content);
-                }
-                log << "# content:\r\n" << (content.size() > 4 * 1024 ? content.substr(0, 4 * 1024) : content) << "\r\n";
+                log << "# content:\r\n" << redactBodyForLog(parser) << "\r\n";
 
                 if (size > 0 && size < 4 * 1024) {
                     auto response = body->readData(size);
@@ -785,7 +807,7 @@ template void check_secret<std::string>(toolkit::SockInfo &, mediakit::HttpSessi
 
 #ifdef ENABLE_WEBRTC
 static string getWebRtcSignalingLabel(const WebRtcTransportImp &transport) {
-    auto &session_type = transport.getSessionType();
+    auto session_type = transport.getSessionType();
     if (start_with(session_type, "whip")) {
         return "whip";
     }
@@ -1830,7 +1852,12 @@ void installWebApi() {
             std::string err;
             std::string path;
             try {
-                path = src->getMuxer()->startRecord(allArgs["path"], allArgs["back_ms"], allArgs["forward_ms"]);
+                // Some sources (such as the ones of a batch publisher) have no muxer and cannot record.
+                auto muxer = src->getMuxer();
+                if (!muxer) {
+                    throw std::runtime_error("this stream does not support recording");
+                }
+                path = muxer->startRecord(allArgs["path"], allArgs["back_ms"], allArgs["forward_ms"]);
             } catch (std::exception &ex) {
                 err = ex.what();
             }
@@ -2230,7 +2257,8 @@ void installWebApi() {
         auto &session = static_cast<Session&>(sender);
         auto location = std::string(session.overSsl() ? "https://" : "http://") + allArgs["host"] + delete_webrtc_url;
         auto args = std::make_shared<WebRtcArgsImp<std::string>>(allArgs, sender.getIdentifier(), session_source);
-        WebRtcPluginManager::Instance().negotiateSdp(session, type, *args, [invoker, offer, headerOut, location](const WebRtcInterface &exchanger) mutable {
+        auto log_target = std::string(type) + " " + allArgs["app"] + "/" + allArgs["stream"] + " from " + sender.get_peer_ip();
+        WebRtcPluginManager::Instance().negotiateSdp(session, type, *args, [invoker, offer, headerOut, location, log_target](const WebRtcInterface &exchanger) mutable {
             auto &handler = const_cast<WebRtcInterface &>(exchanger);
             try {
                 // 设置返回类型  [AUTO-TRANSLATED:ffc2a31a]
@@ -2239,6 +2267,8 @@ void installWebApi() {
                 headerOut["Location"] = location + "?id=" + exchanger.getIdentifier() + "&token=" + exchanger.deleteRandStr();
                 invoker(201, headerOut, handler.getAnswerSdp(offer));
             } catch (std::exception &ex) {
+                // Covers every rejection: hook denial, viewer limit, invalid offer, stream not found.
+                WarnL << "webrtc negotiate failed, " << log_target << ": " << ex.what();
                 headerOut["Content-Type"] = "text/plain";
                 invoker(406, headerOut, ex.what());
             }
@@ -2263,8 +2293,8 @@ void installWebApi() {
         Json::Value data;
         data["app"] = allArgs["app"];
         data["stream"] = allArgs["stream"];
-        auto src = MediaSource::find(RTSP_SCHEMA, DEFAULT_VHOST, allArgs["app"], allArgs["stream"]);
-        data["whepViewerCount"] = src ? src->totalReaderCount() : 0;
+        // Same count as the WHEP viewer limit: WebRTC players of the stream, including ones still negotiating.
+        data["whepViewerCount"] = (Json::UInt64)countWebRtcPlayers(DEFAULT_VHOST, allArgs["app"], allArgs["stream"]);
         val["data"] = std::move(data);
     });
 
@@ -2280,8 +2310,8 @@ void installWebApi() {
             return transport->isShutdown();
         }), transports.end());
         std::sort(transports.begin(), transports.end(), [](const WebRtcTransportImp::Ptr &left, const WebRtcTransportImp::Ptr &right) {
-            auto left_is_whip = start_with(left->getSessionType(), "whip");
-            auto right_is_whip = start_with(right->getSessionType(), "whip");
+            auto left_is_whip = left->isWhipPublisher();
+            auto right_is_whip = right->isWhipPublisher();
             if (left_is_whip != right_is_whip) {
                 return left_is_whip;
             }
@@ -2290,7 +2320,7 @@ void installWebApi() {
 
         unordered_map<string, string> whip_parent_by_media;
         for (const auto &transport : transports) {
-            if (!start_with(transport->getSessionType(), "whip")) {
+            if (!transport->isWhipPublisher()) {
                 continue;
             }
             if (auto batch = std::dynamic_pointer_cast<MultiSourceWebRtcPusher>(transport)) {
@@ -2308,13 +2338,9 @@ void installWebApi() {
             }
         }
 
-        struct ViewerStatistics {
-            Json::UInt64 count = 0;
-            Json::UInt64 send_bytes = 0;
-        };
-        unordered_map<string, ViewerStatistics> viewer_statistics_by_parent;
+        unordered_map<string, Json::UInt64> viewer_count_by_parent;
         for (const auto &transport : transports) {
-            if (transport->getSessionType() != "whep_player") {
+            if (!transport->isWhepPlayer()) {
                 continue;
             }
             auto player = std::dynamic_pointer_cast<WebRtcPlayer>(transport);
@@ -2326,9 +2352,7 @@ void installWebApi() {
             if (parent == whip_parent_by_media.end()) {
                 continue;
             }
-            auto &statistics = viewer_statistics_by_parent[parent->second];
-            ++statistics.count;
-            statistics.send_bytes += (Json::UInt64)transport->getSendTotalBytes();
+            ++viewer_count_by_parent[parent->second];
         }
 
         val["total"] = (Json::UInt64)transports.size();
@@ -2354,16 +2378,15 @@ void installWebApi() {
                 item["app"] = media_info.app;
                 item["stream"] = media_info.stream;
                 item["batch"] = BatchPublishSessionManager::Instance().getSessionSummary(media_info.app, media_info.stream);
-                auto statistics = viewer_statistics_by_parent.find(transport->getIdentifier());
-                if (statistics != viewer_statistics_by_parent.end()) {
-                    item["viewerCount"] = statistics->second.count;
-                    item["sendBytes"] = statistics->second.send_bytes;
+                auto viewers = viewer_count_by_parent.find(transport->getIdentifier());
+                if (viewers != viewer_count_by_parent.end()) {
+                    item["viewerCount"] = viewers->second;
                 }
             } else if (auto player = std::dynamic_pointer_cast<WebRtcPlayer>(transport)) {
                 auto media_info = player->getMediaInfo();
                 item["app"] = media_info.app;
                 item["stream"] = media_info.stream;
-                if (transport->getSessionType() == "whep_player") {
+                if (transport->isWhepPlayer()) {
                     auto it = whip_parent_by_media.find(getWebRtcMediaKey(media_info.app, media_info.stream));
                     if (it != whip_parent_by_media.end()) {
                         item["parentId"] = it->second;
@@ -2373,11 +2396,10 @@ void installWebApi() {
                 auto &media_info = pusher->getMediaInfo();
                 item["app"] = media_info.app;
                 item["stream"] = media_info.stream;
-                if (start_with(transport->getSessionType(), "whip")) {
-                    auto statistics = viewer_statistics_by_parent.find(transport->getIdentifier());
-                    if (statistics != viewer_statistics_by_parent.end()) {
-                        item["viewerCount"] = statistics->second.count;
-                        item["sendBytes"] = statistics->second.send_bytes;
+                if (transport->isWhipPublisher()) {
+                    auto viewers = viewer_count_by_parent.find(transport->getIdentifier());
+                    if (viewers != viewer_count_by_parent.end()) {
+                        item["viewerCount"] = viewers->second;
                     }
                 }
             } else if (auto talk = std::dynamic_pointer_cast<WebRtcTalk>(transport)) {

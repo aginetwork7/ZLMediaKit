@@ -38,11 +38,12 @@ public:
         Closed,
     };
 
+    // Idle -> Bound on whip.bind, Bound -> Receiving on the first RTP of the bound source,
+    // back to Idle on whip.unbind or when the session closes.
     enum class StreamState {
         Idle = 0,
         Bound,
         Receiving,
-        Reclaiming,
     };
 
     struct StreamContext {
@@ -52,6 +53,7 @@ public:
         uint32_t audio_ssrc = 0;
         uint32_t video_ssrc = 0;
         std::string current_source_id;
+        // Set by RTP of the bound source; reported as receiving only while last_rtp_ms is recent.
         bool receiving = false;
         uint64_t last_rtp_ms = 0;
         StreamState state = StreamState::Idle;
@@ -62,7 +64,6 @@ public:
         std::string play_app;
         std::string play_stream;
         std::string stream_id;
-        bool online = false;
         // WHEP viewer limit for this source; 0 means the default.
         size_t max_viewers = 0;
     };
@@ -74,10 +75,16 @@ public:
 
     bool initFromSdp(const RtcSession &answer_sdp, const std::string &rtsp_sdp);
 
+    // Binds source_id to a free stream id, or returns the one it already holds (reused=true; a repeated
+    // bind only refreshes max_viewers). Returns false with a reason when the session is not active or
+    // no stream id is free.
     bool bindSource(const std::string &source_id, size_t max_viewers, std::string &stream_id, bool &reused, std::string &reason);
-    bool unbindSource(const std::string &source_id, std::string &stream_id, bool &reused);
+    // Releases source_id's stream id and unregisters its MediaSource. Idempotent: reused=true means
+    // source_id was not bound, and stream_id is then left unchanged.
+    void unbindSource(const std::string &source_id, std::string &stream_id, bool &reused);
 
-    void clearAllSource();
+    // Releases every source; called when the session's transport is destroyed or replaced.
+    void clearAllSources();
 
     bool onRtp(TrackType type, const std::string &mid, uint32_t ssrc, uint64_t stamp_ms, const RtpPacket::Ptr &rtp);
 
@@ -89,7 +96,6 @@ public:
     const std::string &getApp() const;
     const std::string &getNvrId() const;
     const std::string &getTransportId() const;
-    SessionState getState() const;
 
 private:
     std::shared_ptr<RtspMediaSourceImp> getOrCreateSource(const std::string &source_id);
@@ -97,6 +103,8 @@ private:
     StreamContext *findStreamByMid(const std::string &mid);
     StreamContext *findStreamBySsrc(uint32_t ssrc, TrackType type);
     StreamContext *findStreamById(const std::string &stream_id);
+    // Whether the stream got RTP of its bound source recently.
+    static bool isReceiving(const StreamContext &ctx, uint64_t now_ms);
     bool allocFreeStreamId(std::string &stream_id);
     void releaseStreamId(const std::string &stream_id);
     static const char *sessionStateToStr(SessionState state);

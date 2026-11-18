@@ -16,12 +16,14 @@
 #include <functional>
 #include <vector>
 #include <atomic>
+#include <mutex>
 #include "DtlsTransport.hpp"
 #include "IceTransport.hpp"
 #include "SrtpSession.hpp"
 #include "StunPacket.hpp"
 #include "Sdp.h"
 #include "Util/mini.h"
+#include "Util/util.h"
 #include "Poller/EventPoller.h"
 #include "Network/Socket.h"
 #include "Network/Session.h"
@@ -170,8 +172,19 @@ public:
 
     SignalingProtocols getSignalingProtocols() const { return _signaling_protocols; }
     void setSignalingProtocols(SignalingProtocols signaling_protocols) { _signaling_protocols = signaling_protocols; }
-    const std::string &getSessionType() const { return _session_type; }
-    void setSessionType(std::string session_type) override { _session_type = std::move(session_type); }
+    // The session type is set by the signaling callback after the transport is registered, while
+    // the connection list API may read it from another thread.
+    std::string getSessionType() const {
+        std::lock_guard<std::mutex> lck(_session_type_mtx);
+        return _session_type;
+    }
+    void setSessionType(std::string session_type) override {
+        std::lock_guard<std::mutex> lck(_session_type_mtx);
+        _session_type = std::move(session_type);
+    }
+    // whip_publisher or whip_batch_publisher.
+    bool isWhipPublisher() const { return toolkit::start_with(getSessionType(), "whip"); }
+    bool isWhepPlayer() const { return getSessionType() == "whep_player"; }
 
     float getTimeOutSec() const;
 
@@ -263,6 +276,7 @@ protected:
     SignalingProtocols  _signaling_protocols = SignalingProtocols::WHEP_WHIP;
     Role _role = Role::PEER;
     std::string _session_type;
+    mutable std::mutex _session_type_mtx;
     RtcSession::Ptr _offer_sdp;
     RtcSession::Ptr _answer_sdp;
 
@@ -488,6 +502,10 @@ private:
 };
 
 void translateIPFromEnv(std::vector<std::string> &v);
+
+// Counts WebRTC players of the stream, including ones still negotiating; the WHEP viewer limit
+// counts the same way.
+size_t countWebRtcPlayers(const std::string &vhost, const std::string &app, const std::string &stream);
 
 }// namespace mediakit
 

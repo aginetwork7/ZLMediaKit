@@ -94,7 +94,6 @@ COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/MediaServer /opt/
 COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/MediaServer.debug /opt/media/bin/
 COPY --from=build /usr/local/lib/libsrtp2.so.* /usr/local/lib/
 COPY --from=build /usr/lib/*/libusrsctp.so.* /usr/local/lib/
-COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/config.ini /opt/media/conf/config.ini
 COPY --from=build /opt/media/ZLMediaKit/conf/config.media.ini /opt/media/conf/config.media.ini
 COPY --from=build /opt/media/ZLMediaKit/conf/config.sfu.ini /opt/media/conf/config.sfu.ini
 # 仅保留 webassist，避免 swagger/webrtc 等目录随 http 服务对外暴露

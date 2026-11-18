@@ -17,6 +17,9 @@
 
 namespace mediakit {
 
+// One WebRTC publisher (/index/api/whipBatch) carrying many sources over audio/video m-line pairs.
+// It is the listener of every source of its batch; it provides no muxer, so those sources cannot be
+// recorded, re-sent over RTP or used for talk.
 class MultiSourceWebRtcPusher : public WebRtcTransportImp, public MediaSourceEvent {
 public:
     using Ptr = std::shared_ptr<MultiSourceWebRtcPusher>;
@@ -61,6 +64,13 @@ private:
 
     void handleBind(const Json::Value &root, const std::string &request_id, uint16_t dc_stream_id, uint32_t ppid);
     void handleUnbind(const Json::Value &root, const std::string &request_id, uint16_t dc_stream_id, uint32_t ppid);
+    // Checks data's nvrId and sourceId; on failure replies invalidArgs and returns false.
+    bool checkSourceArgs(const std::string &act,
+                         const Json::Value &data,
+                         const std::string &request_id,
+                         uint16_t dc_stream_id,
+                         uint32_t ppid,
+                         std::string &source_id);
     void sendReply(const std::string &act,
                    const std::string &request_id,
                    const std::string &source_id,
@@ -72,10 +82,11 @@ private:
 
 private:
     MediaInfo _media_info;
-    ProtocolOption _option;
     // Derived from the offer's audio/video pair count in onCheckSdp.
     size_t _stream_count = 0;
     BatchPublishSession::Ptr _batch_session;
+    // Throttles the warning about RTP of unbound streams.
+    toolkit::Ticker _drop_warn_ticker;
 };
 
 } // namespace mediakit

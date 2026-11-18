@@ -385,7 +385,8 @@ public:
     std::string full_url;
     std::string schema;
     std::string host;
-	std::string authorization;
+    // Authorization header of the WebRTC signaling request, forwarded to the publish/play hooks.
+    std::string authorization;
 };
 
 bool equalMediaTuple(const MediaTuple& a, const MediaTuple& b);

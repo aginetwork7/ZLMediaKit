@@ -22,14 +22,14 @@ using namespace std;
 
 namespace mediakit {
 
-// A stream that got no RTP of its source for this long is no longer reported as receiving.
+// A slot that got no RTP of its source for this long is no longer reported as receiving.
 static constexpr uint64_t kReceivingTimeoutMs = 5000;
 
-BatchPublishSession::BatchPublishSession(string app, string nvr_id, string transport_id, size_t stream_count)
+BatchPublishSession::BatchPublishSession(string app, string nvr_id, string transport_id, size_t slot_count)
     : _app(std::move(app))
     , _nvr_id(std::move(nvr_id))
     , _transport_id(std::move(transport_id))
-    , _stream_count(stream_count) {
+    , _slot_count(slot_count) {
     _state = SessionState::Init;
 }
 
@@ -39,7 +39,7 @@ bool BatchPublishSession::initFromSdp(const RtcSession &answer_sdp, const string
     _rtsp_sdp = rtsp_sdp;
 
     vector<pair<const RtcMedia *, const RtcMedia *>> av_pairs;
-    av_pairs.reserve(_stream_count);
+    av_pairs.reserve(_slot_count);
 
     const RtcMedia *pending_audio = nullptr;
     for (auto &m : answer_sdp.media) {
@@ -50,7 +50,7 @@ bool BatchPublishSession::initFromSdp(const RtcSession &answer_sdp, const string
         if (!pending_audio) {
             if (m.type != TrackAudio) {
                 WarnL << "batch sdp layout invalid, expect audio then video, app=" << _app
-                      << ", nvrId=" << _nvr_id << ", streamCount=" << _stream_count;
+                      << ", nvrId=" << _nvr_id << ", streamCount=" << _slot_count;
                 return false;
             }
             pending_audio = &m;
@@ -59,7 +59,7 @@ bool BatchPublishSession::initFromSdp(const RtcSession &answer_sdp, const string
 
         if (m.type != TrackVideo) {
             WarnL << "batch sdp layout invalid, expect video after audio, app=" << _app
-                  << ", nvrId=" << _nvr_id << ", streamCount=" << _stream_count;
+                  << ", nvrId=" << _nvr_id << ", streamCount=" << _slot_count;
             return false;
         }
 
@@ -72,43 +72,43 @@ bool BatchPublishSession::initFromSdp(const RtcSession &answer_sdp, const string
 
     if (pending_audio) {
         WarnL << "batch sdp layout invalid, dangling audio track without video, app=" << _app
-              << ", nvrId=" << _nvr_id << ", streamCount=" << _stream_count;
+              << ", nvrId=" << _nvr_id << ", streamCount=" << _slot_count;
         return false;
     }
 
-    if (av_pairs.size() != _stream_count) {
+    if (av_pairs.size() != _slot_count) {
         WarnL << "batch sdp pair count mismatch, app=" << _app << ", nvrId=" << _nvr_id
-              << ", streamCount=" << _stream_count << ", avPairs=" << av_pairs.size();
+              << ", streamCount=" << _slot_count << ", avPairs=" << av_pairs.size();
         return false;
     }
 
-    _streams.clear();
-    _free_stream_ids.clear();
+    _slots.clear();
+    _free_slot_ids.clear();
     _source_bindings.clear();
-    _mid_to_stream.clear();
-    _audio_ssrc_to_stream.clear();
-    _video_ssrc_to_stream.clear();
+    _mid_to_slot.clear();
+    _audio_ssrc_to_slot.clear();
+    _video_ssrc_to_slot.clear();
 
-    for (size_t i = 0; i < _stream_count; ++i) {
-        StreamContext ctx;
-        ctx.stream_id = to_string(i);
+    for (size_t i = 0; i < _slot_count; ++i) {
+        SlotContext ctx;
+        ctx.slot_id = to_string(i);
         ctx.audio_mid = av_pairs[i].first->mid;
         ctx.video_mid = av_pairs[i].second->mid;
         ctx.audio_ssrc = av_pairs[i].first->getRtpSSRC();
         ctx.video_ssrc = av_pairs[i].second->getRtpSSRC();
-        ctx.state = StreamState::Idle;
+        ctx.state = SlotState::Idle;
 
-        _mid_to_stream[ctx.audio_mid] = ctx.stream_id;
-        _mid_to_stream[ctx.video_mid] = ctx.stream_id;
+        _mid_to_slot[ctx.audio_mid] = ctx.slot_id;
+        _mid_to_slot[ctx.video_mid] = ctx.slot_id;
         if (ctx.audio_ssrc) {
-            _audio_ssrc_to_stream[ctx.audio_ssrc] = ctx.stream_id;
+            _audio_ssrc_to_slot[ctx.audio_ssrc] = ctx.slot_id;
         }
         if (ctx.video_ssrc) {
-            _video_ssrc_to_stream[ctx.video_ssrc] = ctx.stream_id;
+            _video_ssrc_to_slot[ctx.video_ssrc] = ctx.slot_id;
         }
 
-        _streams.emplace_back(std::move(ctx));
-        _free_stream_ids.emplace_back(_streams.back().stream_id);
+        _slots.emplace_back(std::move(ctx));
+        _free_slot_ids.emplace_back(_slots.back().slot_id);
     }
 
     _state = SessionState::Active;
@@ -121,7 +121,7 @@ void BatchPublishSession::setListener(std::weak_ptr<MediaSourceEvent> listener) 
     _listener = std::move(listener);
 }
 
-bool BatchPublishSession::bindSource(const string &source_id, size_t max_viewers, string &stream_id, bool &reused, string &reason) {
+bool BatchPublishSession::bindSource(const string &source_id, size_t max_viewers, string &slot_id, bool &reused, string &reason) {
     lock_guard<recursive_mutex> lck(_mtx);
     reused = false;
 
@@ -139,31 +139,31 @@ bool BatchPublishSession::bindSource(const string &source_id, size_t max_viewers
         if (_rejected_sources.erase(source_id)) {
             InfoL << "batch source retry after rejection, app=" << _app << ", nvrId=" << _nvr_id << ", sourceId=" << source_id;
         }
-        stream_id = it->second.stream_id;
+        slot_id = it->second.slot_id;
         reason = "reused";
         return true;
     }
 
-    if (!allocFreeStreamId(stream_id)) {
+    if (!allocFreeSlotId(slot_id)) {
         reason = "noAvailableStreamId";
         return false;
     }
 
-    auto ctx = findStreamById(stream_id);
+    auto ctx = findSlotById(slot_id);
     if (!ctx) {
         reason = "stateReclaimed";
         return false;
     }
 
     ctx->current_source_id = source_id;
-    ctx->state = StreamState::Bound;
+    ctx->state = SlotState::Bound;
     ctx->receiving = false;
 
     SourceBinding binding;
     binding.source_id = source_id;
     binding.play_app = _app;
     binding.play_stream = source_id;
-    binding.stream_id = stream_id;
+    binding.slot_id = slot_id;
     binding.max_viewers = max_viewers;
     _source_bindings[source_id] = std::move(binding);
 
@@ -171,7 +171,7 @@ bool BatchPublishSession::bindSource(const string &source_id, size_t max_viewers
     return true;
 }
 
-void BatchPublishSession::unbindSource(const string &source_id, string &stream_id, bool &reused) {
+void BatchPublishSession::unbindSource(const string &source_id, string &slot_id, bool &reused) {
     lock_guard<recursive_mutex> lck(_mtx);
     reused = false;
 
@@ -181,17 +181,17 @@ void BatchPublishSession::unbindSource(const string &source_id, string &stream_i
         return;
     }
 
-    stream_id = it->second.stream_id;
+    slot_id = it->second.slot_id;
     _source_bindings.erase(it);
 
-    auto ctx = findStreamById(stream_id);
+    auto ctx = findSlotById(slot_id);
     if (ctx) {
         ctx->current_source_id.clear();
         ctx->receiving = false;
-        ctx->state = StreamState::Idle;
+        ctx->state = SlotState::Idle;
     }
 
-    releaseStreamId(stream_id);
+    releaseSlotId(slot_id);
     releaseSource(source_id);
 }
 
@@ -205,12 +205,12 @@ void BatchPublishSession::clearAllSources() {
         releaseSource(source_id);
     }
     _rejected_sources.clear();
-    _free_stream_ids.clear();
-    for (auto &ctx : _streams) {
+    _free_slot_ids.clear();
+    for (auto &ctx : _slots) {
         ctx.current_source_id.clear();
         ctx.receiving = false;
-        ctx.state = StreamState::Idle;
-        _free_stream_ids.emplace_back(ctx.stream_id);
+        ctx.state = SlotState::Idle;
+        _free_slot_ids.emplace_back(ctx.slot_id);
     }
     _state = SessionState::Closed;
 }
@@ -254,12 +254,12 @@ static bool isEdgeKeyFrameStart(const RtpPacket::Ptr &rtp) {
 bool BatchPublishSession::onRtp(TrackType type, const string &mid, uint32_t ssrc, uint64_t stamp_ms, const RtpPacket::Ptr &rtp) {
     lock_guard<recursive_mutex> lck(_mtx);
 
-    StreamContext *ctx = nullptr;
+    SlotContext *ctx = nullptr;
     if (!mid.empty()) {
-        ctx = findStreamByMid(mid);
+        ctx = findSlotByMid(mid);
     }
     if (!ctx && ssrc) {
-        ctx = findStreamBySsrc(ssrc, type);
+        ctx = findSlotBySsrc(ssrc, type);
     }
     if (!ctx) {
         return false;
@@ -267,21 +267,21 @@ bool BatchPublishSession::onRtp(TrackType type, const string &mid, uint32_t ssrc
 
     if (type == TrackAudio && !ctx->audio_ssrc && ssrc) {
         ctx->audio_ssrc = ssrc;
-        _audio_ssrc_to_stream[ssrc] = ctx->stream_id;
+        _audio_ssrc_to_slot[ssrc] = ctx->slot_id;
     }
     if (type == TrackVideo && !ctx->video_ssrc && ssrc) {
         ctx->video_ssrc = ssrc;
-        _video_ssrc_to_stream[ssrc] = ctx->stream_id;
+        _video_ssrc_to_slot[ssrc] = ctx->slot_id;
     }
 
-    // RTP on a stream with no (usable) source is dropped and does not count as receiving.
+    // RTP on a slot with no (usable) source is dropped and does not count as receiving.
     if (ctx->current_source_id.empty() || _rejected_sources.count(ctx->current_source_id)) {
         return false;
     }
 
     ctx->last_rtp_ms = stamp_ms;
     ctx->receiving = true;
-    ctx->state = StreamState::Receiving;
+    ctx->state = SlotState::Receiving;
 
     auto src = getOrCreateSource(ctx->current_source_id);
     if (!src) {
@@ -309,9 +309,9 @@ Json::Value BatchPublishSession::makeHeader() const {
     data["app"] = _app;
     data["stream"] = _nvr_id;
     data["transportId"] = _transport_id;
-    data["streamCount"] = (Json::UInt64)_stream_count;
+    data["streamCount"] = (Json::UInt64)_slot_count;
     data["state"] = sessionStateToStr(_state);
-    data["freeStreamCount"] = (Json::UInt64)_free_stream_ids.size();
+    data["freeStreamCount"] = (Json::UInt64)_free_slot_ids.size();
     return data;
 }
 
@@ -321,10 +321,10 @@ Json::Value BatchPublishSession::getInfo() const {
 
     auto now_ms = toolkit::getCurrentMillisecond();
     Json::Value streams(Json::arrayValue);
-    for (auto &ctx : _streams) {
+    for (auto &ctx : _slots) {
         auto receiving = isReceiving(ctx, now_ms);
         Json::Value item;
-        item["streamId"] = ctx.stream_id;
+        item["streamId"] = ctx.slot_id;
         item["audioMid"] = ctx.audio_mid;
         item["videoMid"] = ctx.video_mid;
         item["audioSsrc"] = (Json::UInt64)ctx.audio_ssrc;
@@ -332,7 +332,7 @@ Json::Value BatchPublishSession::getInfo() const {
         item["sourceId"] = ctx.current_source_id;
         item["receiving"] = receiving;
         // A source that stopped sending is reported as bound until RTP comes again.
-        item["state"] = streamStateToStr(ctx.state == StreamState::Receiving && !receiving ? StreamState::Bound : ctx.state);
+        item["state"] = slotStateToStr(ctx.state == SlotState::Receiving && !receiving ? SlotState::Bound : ctx.state);
         streams.append(item);
     }
 
@@ -340,7 +340,7 @@ Json::Value BatchPublishSession::getInfo() const {
     for (auto &it : _source_bindings) {
         Json::Value item;
         item["sourceId"] = it.second.source_id;
-        item["streamId"] = it.second.stream_id;
+        item["streamId"] = it.second.slot_id;
         item["playApp"] = it.second.play_app;
         item["playStream"] = it.second.play_stream;
         // A binding exists only while its source is online.
@@ -350,7 +350,7 @@ Json::Value BatchPublishSession::getInfo() const {
     }
 
     Json::Value free_streams(Json::arrayValue);
-    for (auto &id : _free_stream_ids) {
+    for (auto &id : _free_slot_ids) {
         free_streams.append(id);
     }
 
@@ -367,8 +367,8 @@ Json::Value BatchPublishSession::getSummary() const {
     Json::UInt64 bound_count = 0;
     Json::UInt64 receiving_count = 0;
     auto now_ms = toolkit::getCurrentMillisecond();
-    for (const auto &stream : _streams) {
-        if (stream.state == StreamState::Bound || stream.state == StreamState::Receiving) {
+    for (const auto &stream : _slots) {
+        if (stream.state == SlotState::Bound || stream.state == SlotState::Receiving) {
             ++bound_count;
         }
         if (isReceiving(stream, now_ms)) {
@@ -445,52 +445,52 @@ void BatchPublishSession::releaseSource(const string &source_id) {
     InfoL << "batch source offline, app=" << _app << ", nvrId=" << _nvr_id << ", sourceId=" << source_id;
 }
 
-BatchPublishSession::StreamContext *BatchPublishSession::findStreamByMid(const string &mid) {
-    auto it = _mid_to_stream.find(mid);
-    if (it == _mid_to_stream.end()) {
+BatchPublishSession::SlotContext *BatchPublishSession::findSlotByMid(const string &mid) {
+    auto it = _mid_to_slot.find(mid);
+    if (it == _mid_to_slot.end()) {
         return nullptr;
     }
-    return findStreamById(it->second);
+    return findSlotById(it->second);
 }
 
-// A stream id is the index of its stream in _streams (see initFromSdp).
-BatchPublishSession::StreamContext *BatchPublishSession::findStreamById(const string &stream_id) {
-    if (stream_id.empty() || stream_id.size() > 4 || !all_of(stream_id.begin(), stream_id.end(), [](unsigned char c) { return isdigit(c); })) {
+// A slot id is the index of its slot in _slots (see initFromSdp).
+BatchPublishSession::SlotContext *BatchPublishSession::findSlotById(const string &slot_id) {
+    if (slot_id.empty() || slot_id.size() > 4 || !all_of(slot_id.begin(), slot_id.end(), [](unsigned char c) { return isdigit(c); })) {
         return nullptr;
     }
-    auto index = (size_t)stoul(stream_id);
-    if (index >= _streams.size() || _streams[index].stream_id != stream_id) {
+    auto index = (size_t)stoul(slot_id);
+    if (index >= _slots.size() || _slots[index].slot_id != slot_id) {
         return nullptr;
     }
-    return &_streams[index];
+    return &_slots[index];
 }
 
-bool BatchPublishSession::isReceiving(const StreamContext &ctx, uint64_t now_ms) {
+bool BatchPublishSession::isReceiving(const SlotContext &ctx, uint64_t now_ms) {
     return ctx.receiving && now_ms - ctx.last_rtp_ms < kReceivingTimeoutMs;
 }
 
-BatchPublishSession::StreamContext *BatchPublishSession::findStreamBySsrc(uint32_t ssrc, TrackType type) {
-    const auto *map = type == TrackAudio ? &_audio_ssrc_to_stream : &_video_ssrc_to_stream;
+BatchPublishSession::SlotContext *BatchPublishSession::findSlotBySsrc(uint32_t ssrc, TrackType type) {
+    const auto *map = type == TrackAudio ? &_audio_ssrc_to_slot : &_video_ssrc_to_slot;
     auto it = map->find(ssrc);
     if (it == map->end()) {
         return nullptr;
     }
-    return findStreamById(it->second);
+    return findSlotById(it->second);
 }
 
-bool BatchPublishSession::allocFreeStreamId(string &stream_id) {
-    if (_free_stream_ids.empty()) {
+bool BatchPublishSession::allocFreeSlotId(string &slot_id) {
+    if (_free_slot_ids.empty()) {
         return false;
     }
-    stream_id = _free_stream_ids.front();
-    _free_stream_ids.pop_front();
+    slot_id = _free_slot_ids.front();
+    _free_slot_ids.pop_front();
     return true;
 }
 
-void BatchPublishSession::releaseStreamId(const string &stream_id) {
-    auto it = std::find(_free_stream_ids.begin(), _free_stream_ids.end(), stream_id);
-    if (it == _free_stream_ids.end()) {
-        _free_stream_ids.emplace_back(stream_id);
+void BatchPublishSession::releaseSlotId(const string &slot_id) {
+    auto it = std::find(_free_slot_ids.begin(), _free_slot_ids.end(), slot_id);
+    if (it == _free_slot_ids.end()) {
+        _free_slot_ids.emplace_back(slot_id);
     }
 }
 
@@ -505,11 +505,11 @@ const char *BatchPublishSession::sessionStateToStr(SessionState state) {
     }
 }
 
-const char *BatchPublishSession::streamStateToStr(StreamState state) {
+const char *BatchPublishSession::slotStateToStr(SlotState state) {
     switch (state) {
-        case StreamState::Idle: return "Idle";
-        case StreamState::Bound: return "Bound";
-        case StreamState::Receiving: return "Receiving";
+        case SlotState::Idle: return "Idle";
+        case SlotState::Bound: return "Bound";
+        case SlotState::Receiving: return "Receiving";
         default: return "Unknown";
     }
 }

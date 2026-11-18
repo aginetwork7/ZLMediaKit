@@ -63,7 +63,7 @@ void MultiSourceWebRtcPusher::onStartWebRTC() {
         return;
     }
 
-    _batch_session = std::make_shared<BatchPublishSession>(_media_info.app, _media_info.stream, getIdentifier(), _stream_count);
+    _batch_session = std::make_shared<BatchPublishSession>(_media_info.app, _media_info.stream, getIdentifier(), _slot_count);
     _batch_session->setListener(std::static_pointer_cast<MultiSourceWebRtcPusher>(shared_from_this()));
     if (!_batch_session->initFromSdp(*_answer_sdp, _answer_sdp->toRtspSdp())) {
         onShutdown(SockException(Err_other, "batch stream table init failed"));
@@ -78,7 +78,7 @@ void MultiSourceWebRtcPusher::onStartWebRTC() {
         }
     }
     InfoL << "batch session created, app=" << _media_info.app << ", nvrId=" << _media_info.stream
-          << ", streamCount=" << _stream_count << ", transportId=" << getIdentifier();
+          << ", streamCount=" << _slot_count << ", transportId=" << getIdentifier();
 }
 
 bool MultiSourceWebRtcPusher::close(MediaSource &sender) {
@@ -147,7 +147,7 @@ void MultiSourceWebRtcPusher::onCheckSdp(SdpType type, RtcSession &sdp) {
 
     CHECK(expect_audio, "batch offer layout invalid, dangling audio track without video");
     CHECK(av_count > 0, "batch offer has no audio/video pair");
-    _stream_count = av_count;
+    _slot_count = av_count;
 }
 
 void MultiSourceWebRtcPusher::onRtcConfigure(RtcConfigure &configure) const {
@@ -248,10 +248,10 @@ void MultiSourceWebRtcPusher::handleBind(const Json::Value &root,
     // 0 means the default WHEP viewer limit.
     auto max_viewers = data["maxViewers"].isUInt() ? (size_t)data["maxViewers"].asUInt() : 0;
 
-    string stream_id;
+    string slot_id;
     string reason;
     bool reused = false;
-    auto ok = _batch_session->bindSource(source_id, max_viewers, stream_id, reused, reason);
+    auto ok = _batch_session->bindSource(source_id, max_viewers, slot_id, reused, reason);
     if (!ok) {
         WarnL << "whip.bind failed, app=" << _media_info.app << ", nvrId=" << _media_info.stream << ", sourceId=" << source_id
               << ", reason=" << reason;
@@ -260,7 +260,7 @@ void MultiSourceWebRtcPusher::handleBind(const Json::Value &root,
         return;
     }
 
-    sendReply("whip.bind", request_id, source_id, stream_id, dc_stream_id, ppid, kCodeSuccess, reused ? "reused" : "");
+    sendReply("whip.bind", request_id, source_id, slot_id, dc_stream_id, ppid, kCodeSuccess, reused ? "reused" : "");
 }
 
 void MultiSourceWebRtcPusher::handleUnbind(const Json::Value &root,
@@ -272,10 +272,10 @@ void MultiSourceWebRtcPusher::handleUnbind(const Json::Value &root,
         return;
     }
 
-    string stream_id;
+    string slot_id;
     bool reused = false;
-    _batch_session->unbindSource(source_id, stream_id, reused);
-    sendReply("whip.unbind", request_id, source_id, stream_id, dc_stream_id, ppid, kCodeSuccess, reused ? "reused" : "");
+    _batch_session->unbindSource(source_id, slot_id, reused);
+    sendReply("whip.unbind", request_id, source_id, slot_id, dc_stream_id, ppid, kCodeSuccess, reused ? "reused" : "");
 }
 
 bool MultiSourceWebRtcPusher::checkSourceArgs(const string &act,
@@ -304,7 +304,7 @@ bool MultiSourceWebRtcPusher::checkSourceArgs(const string &act,
 void MultiSourceWebRtcPusher::sendReply(const string &act,
                                        const string &request_id,
                                        const string &source_id,
-                                       const string &stream_id,
+                                       const string &slot_id,
                                        uint16_t dc_stream_id,
                                        uint32_t ppid,
                                        int err_code,
@@ -317,8 +317,8 @@ void MultiSourceWebRtcPusher::sendReply(const string &act,
     if (!source_id.empty()) {
         data["sourceId"] = source_id;
     }
-    if (!stream_id.empty()) {
-        data["streamId"] = stream_id;
+    if (!slot_id.empty()) {
+        data["streamId"] = slot_id;
     }
     root["data"] = std::move(data);
 

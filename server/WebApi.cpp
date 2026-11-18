@@ -2311,12 +2311,15 @@ void installWebApi() {
     api_regist("/index/api/whep", [](API_ARGS_STRING_ASYNC) { whip_whep_func("play", "whep", API_ARGS_VALUE, invoker); });
     api_regist("/index/api/whipBatch", [](API_ARGS_STRING_ASYNC) { whip_whep_func("push_batch", "whip_batch", API_ARGS_VALUE, invoker); });
 
-    api_regist("/index/api/whipBatchInfo", [](API_ARGS_MAP) {
+    static auto get_whip_batch_info = [](API_ARGS_MAP) {
         CHECK_SECRET();
         CHECK_ARGS("app", "stream");
 
         val["data"] = BatchPublishSessionManager::Instance().getSessionInfo(allArgs["app"], allArgs["stream"]);
-    });
+    };
+    api_regist("/index/api/getWhipBatchInfo", [](API_ARGS_MAP) { get_whip_batch_info(API_ARGS_VALUE); });
+    // Deprecated name kept for existing callers (zlm-exporter); use getWhipBatchInfo.
+    api_regist("/index/api/whipBatchInfo", [](API_ARGS_MAP) { get_whip_batch_info(API_ARGS_VALUE); });
 
     api_regist("/index/api/getWhepViewerCount", [](API_ARGS_MAP) {
         CHECK_SECRET();

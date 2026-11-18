@@ -74,7 +74,7 @@ private:
     void sendReply(const std::string &act,
                    const std::string &request_id,
                    const std::string &source_id,
-                   const std::string &stream_id,
+                   const std::string &slot_id,
                    uint16_t dc_stream_id,
                    uint32_t ppid,
                    int err_code,
@@ -83,9 +83,9 @@ private:
 private:
     MediaInfo _media_info;
     // Derived from the offer's audio/video pair count in onCheckSdp.
-    size_t _stream_count = 0;
+    size_t _slot_count = 0;
     BatchPublishSession::Ptr _batch_session;
-    // Throttles the warning about RTP of unbound streams.
+    // Throttles the warning about dropped RTP.
     toolkit::Ticker _drop_warn_ticker;
 };
 

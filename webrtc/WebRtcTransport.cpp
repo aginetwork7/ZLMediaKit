@@ -1771,6 +1771,14 @@ void WebRtcPluginManager::setListener(Listener cb) {
 }
 
 void WebRtcPluginManager::negotiateSdp(SocketHelper& sender, const string &type, const WebRtcArgs &args, const onCreateWebRtc &cb_in) {
+    // With neither rtc.port nor rtc.tcpPort no media can flow; deployments without WebRTC (such as
+    // the ai-box) set both to 0, so signaling must not create transports either.
+    GET_CONFIG(uint16_t, rtc_udp_port, Rtc::kPort);
+    GET_CONFIG(uint16_t, rtc_tcp_port, Rtc::kTcpPort);
+    if (!rtc_udp_port && !rtc_tcp_port) {
+        cb_in(WebRtcException(SockException(Err_other, "webrtc is disabled")));
+        return;
+    }
     onCreateWebRtc cb;
     lock_guard<mutex> lck(_mtx_creator);
     if (_listener) {

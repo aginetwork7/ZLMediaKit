@@ -6,9 +6,11 @@ services:
       - ${PWD}/.env
     environment:
       MEDIA_CONFIG_TYPE: ${MEDIA_CONFIG_TYPE:-sfu}
-      MEDIA_SERVICE_HOOK_BASE_URL: ${MEDIA_SERVICE_HOOK_BASE_URL:-"http://host.docker.internal:8080/agi7/api/media-control/hook"}
+      # 必填，指向本环境 media-control 的 hook 根路径（旧的默认值带字面引号，从未生效）
+      MEDIA_SERVICE_HOOK_BASE_URL: ${MEDIA_SERVICE_HOOK_BASE_URL:?MEDIA_SERVICE_HOOK_BASE_URL is required}
       MEDIA_SERVER_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}
-      MEDIA_SERVER_ID: ${MEDIA_SERVER_ID:-}
+      # SFU 节点必填（entrypoint 同样校验），fluent-bit 也以它标识上报来源
+      MEDIA_SERVER_ID: ${MEDIA_SERVER_ID:?MEDIA_SERVER_ID is required}
       EXTERN_IP: ${EXTERN_IP:?EXTERN_IP is required}
     volumes:
       - ${PWD}/log:/opt/media/bin/log
@@ -23,7 +25,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "8080:8080/tcp"
+      # 宿主机端口取 ZLM_HTTP_PORT（默认 8080），与 zlm-exporter 访问的端口保持一致
+      - "${ZLM_HTTP_PORT:-8080}:8080/tcp"
       - "8000:8000/tcp"
       - "8000:8000/udp"
 
@@ -33,7 +36,8 @@ services:
     depends_on:
       - zlmediakit
     environment:
-      # 经宿主机映射端口访问本环境 ZLM：同机多套环境共用 agi7 网络，服务名 zlmediakit 会解析到多个容器
+      # 经宿主机映射端口访问本环境 ZLM：同机多套环境共用 agi7 网络，服务名 zlmediakit 会解析到多个容器。
+      # ZLM_HTTP_PORT 与上面 zlmediakit 的端口映射共用同一变量
       ZLM_API_URL: http://host.docker.internal:${ZLM_HTTP_PORT:-8080}
       ZLM_API_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}
     restart: always
@@ -53,6 +57,7 @@ services:
   fluent-bit-zlm:
     image: fluent/fluent-bit:5.1
     container_name: fluent-bit-zlm
+    # 下面两个流的窗口（60/180 秒）与 conf/netif_rates.lua 中按 tag 选用的除数一一对应，修改时两处同步
     command:
       - -c
       - /fluent-bit/etc/fluent-bit.yaml

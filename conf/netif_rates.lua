@@ -1,3 +1,5 @@
+-- The window lengths must match the tumbling windows of the host.netif.1m / host.netif.3m streams
+-- created in docker-compose.sfu.yml (fluent-bit command); change both together.
 function add_bps(tag, timestamp, record)
     local window_seconds
 

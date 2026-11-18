@@ -432,8 +432,10 @@ int start_main(int argc,char *argv[]) {
             WarnL << kHookBaseUrlPlaceholder << " is not replaced in " << unresolved_hook << " (hooks are disabled)";
         }
 #if defined(ENABLE_WEBRTC)
-        // WHIP / whipBatch publishers are authorized only by the on_publish hook.
-        if (!mINI::Instance()["hook.enable"].as<bool>() || mINI::Instance()["hook.on_publish"].empty()) {
+        // WHIP / whipBatch publishers are authorized only by the on_publish hook (WebRTC is off when
+        // both rtc ports are 0).
+        auto webrtc_enabled = mINI::Instance()[Rtc::kPort].as<uint16_t>() || mINI::Instance()[Rtc::kTcpPort].as<uint16_t>();
+        if (webrtc_enabled && (!mINI::Instance()["hook.enable"].as<bool>() || mINI::Instance()["hook.on_publish"].empty())) {
             WarnL << "hook.on_publish is disabled: WHIP and whipBatch publishing is not authenticated";
         }
 #endif

@@ -17,11 +17,11 @@ services:
         # restart constraint above).
         # NOTE: this file is a reference copy only. The ai-box deployment uses its
         # own compose in the deployment repo, where MEDIA_SERVER_SECRET is replaced
-        # with the real value; the secret below is a development placeholder.
+        # with the real value; CHANGE_ME below is a placeholder the entrypoint refuses.
         environment:
             MEDIA_CONFIG_TYPE: media
             MEDIA_SERVICE_HOOK_BASE_URL: http://127.0.0.1:8088/internal/media/zlm/hooks
-            MEDIA_SERVER_SECRET: ITD3alrYMAuL7GDPXn5de45Y7Zj071OV
+            MEDIA_SERVER_SECRET: CHANGE_ME
         cap_add:
             - SYS_NICE
         ulimits:

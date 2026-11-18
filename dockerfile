@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
          ca-certificates \
          tzdata \
          libssl-dev \
-		 libusrsctp-dev \
+         libusrsctp-dev \
          gcc \
          g++ \
          gdb && \
@@ -98,6 +98,9 @@ COPY --from=build /opt/media/ZLMediaKit/conf/config.media.ini /opt/media/conf/co
 COPY --from=build /opt/media/ZLMediaKit/conf/config.sfu.ini /opt/media/conf/config.sfu.ini
 # 仅保留 webassist，避免 swagger/webrtc 等目录随 http 服务对外暴露
 COPY --from=build /opt/media/ZLMediaKit/www/webassist/ /opt/media/bin/www/webassist/
+# 两份配置的 api.defaultSnap=./www/logo.png：截图还未生成时返回的默认图片
+# Both configs use api.defaultSnap=./www/logo.png, returned while a snapshot is not ready yet
+COPY --from=build /opt/media/ZLMediaKit/www/logo.png /opt/media/bin/www/logo.png
 COPY --from=build /opt/media/ZLMediaKit/tools/record_zlm_resources.sh /opt/media/bin/
 COPY docker-entrypoint.sh /opt/media/bin/docker-entrypoint.sh
 RUN ldconfig && \

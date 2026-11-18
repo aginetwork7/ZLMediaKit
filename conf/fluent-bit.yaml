@@ -35,7 +35,11 @@ pipeline:
       match: host.*
       host: ${MEDIA_CONTROL_HOST}
       port: ${MEDIA_CONTROL_PORT}
+      # 当前 media-control 与本机同处（host.docker.internal），流量不出宿主机；若控制面部署在其它主机，需开启 tls。
+      # Media-control currently runs on the same host, so traffic stays local; enable tls if it moves to another host.
       # tls: true
       metrics_uri: /agi7/api/media-control/hook/on_system_metrics
       logs_uri: /agi7/api/media-control/hook/on_system_metrics
+      # media-control 以本节点的 ZLM API secret 认证上报；改用独立 token 需要 media-control 同步支持。
+      # media-control authenticates reports with this node's ZLM API secret; a separate token needs media-control support.
       header: Authorization Bearer ${MEDIA_SERVER_SECRET}

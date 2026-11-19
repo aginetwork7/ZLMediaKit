@@ -26,7 +26,6 @@ public:
 
     static Ptr create(const toolkit::EventPoller::Ptr &poller,
                       const MediaInfo &info,
-                      const ProtocolOption &option,
                       WebRtcTransport::Role role,
                       WebRtcTransport::SignalingProtocols signaling_protocols);
 
@@ -58,9 +57,7 @@ protected:
 #endif
 
 private:
-    MultiSourceWebRtcPusher(const toolkit::EventPoller::Ptr &poller,
-                            const MediaInfo &info,
-                            const ProtocolOption &option);
+    MultiSourceWebRtcPusher(const toolkit::EventPoller::Ptr &poller, const MediaInfo &info);
 
     void handleBind(const Json::Value &root, const std::string &request_id, uint16_t dc_stream_id, uint32_t ppid);
     void handleUnbind(const Json::Value &root, const std::string &request_id, uint16_t dc_stream_id, uint32_t ppid);

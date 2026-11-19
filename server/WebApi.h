@@ -28,6 +28,9 @@
 // 配置文件路径  [AUTO-TRANSLATED:8a373c2f]
 // Configuration file path
 extern std::string g_ini_file;
+// Saves the running config to g_ini_file. Keys that still hold a command-line override (--secret,
+// --media-server-id, --hook-base-url) keep the file's own value, so those values never reach the file.
+void saveIniFile();
 
 namespace mediakit {
 // //////////RTSP服务器配置///////////  [AUTO-TRANSLATED:950e1981]
@@ -361,7 +364,7 @@ public:
         if (key == "url") {
             return getUrl();
         }
-        if (key == "session_source") {
+        if (key == mediakit::WebRtcSessionNames::kSourceKey) {
             return _session_source;
         }
         if (key == "Authorization") {

@@ -171,13 +171,13 @@ bool BatchPublishSession::bindSource(const string &source_id, size_t max_viewers
     return true;
 }
 
-void BatchPublishSession::unbindSource(const string &source_id, string &slot_id, bool &reused) {
+void BatchPublishSession::unbindSource(const string &source_id, string &slot_id, bool &not_bound) {
     lock_guard<recursive_mutex> lck(_mtx);
-    reused = false;
+    not_bound = false;
 
     auto it = _source_bindings.find(source_id);
     if (it == _source_bindings.end()) {
-        reused = true;
+        not_bound = true;
         return;
     }
 
@@ -195,7 +195,7 @@ void BatchPublishSession::unbindSource(const string &source_id, string &slot_id,
     releaseSource(source_id);
 }
 
-void BatchPublishSession::clearAllSources() {
+void BatchPublishSession::closeAndReleaseAllSources() {
     lock_guard<recursive_mutex> lck(_mtx);
     _state = SessionState::Closing;
     _source_bindings.clear();
@@ -345,6 +345,9 @@ Json::Value BatchPublishSession::getInfo() const {
         item["playStream"] = it.second.play_stream;
         // A binding exists only while its source is online.
         item["online"] = true;
+        // The stream registration was rejected (e.g. the name was held); RTP is dropped until the
+        // source is bound again.
+        item["rejected"] = _rejected_sources.count(it.second.source_id) > 0;
         item["maxViewers"] = (Json::UInt64)it.second.max_viewers;
         sources.append(item);
     }

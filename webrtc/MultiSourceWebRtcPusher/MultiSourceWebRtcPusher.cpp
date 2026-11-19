@@ -10,6 +10,7 @@
 
 #include "MultiSourceWebRtcPusher.h"
 
+#include <cstring>
 #include "Util/logger.h"
 
 using namespace std;
@@ -25,14 +26,31 @@ constexpr int kCodeOtherFailed = -1;
 constexpr int kCodeInvalidArgs = -300;
 constexpr int kCodeException = -400;
 constexpr int kCodeNotFound = -500;
+
+// sourceId becomes the stream name app/sourceId that WHEP viewers play, so it must be one path
+// segment that needs no URL encoding: no '/', '\\', "..", whitespace, control or URL-reserved
+// characters, and at most kMaxSourceIdLen bytes. The edge's live and playback ids
+// (<mac>-<ch>-<sub>[-<startAt>-<endAt>-<sessionId>]) pass.
+constexpr size_t kMaxSourceIdLen = 256;
+
+bool isValidSourceId(const std::string &source_id) {
+    if (source_id.empty() || source_id.size() > kMaxSourceIdLen || source_id.find("..") != std::string::npos) {
+        return false;
+    }
+    for (unsigned char ch : source_id) {
+        if (ch <= 0x20 || ch == 0x7F || strchr("/\\?#&%\"'<>", ch)) {
+            return false;
+        }
+    }
+    return true;
+}
 }
 
 MultiSourceWebRtcPusher::Ptr MultiSourceWebRtcPusher::create(const EventPoller::Ptr &poller,
                                                              const MediaInfo &info,
-                                                             const ProtocolOption &option,
                                                              WebRtcTransport::Role role,
                                                              WebRtcTransport::SignalingProtocols signaling_protocols) {
-    MultiSourceWebRtcPusher::Ptr pusher(new MultiSourceWebRtcPusher(poller, info, option), [](MultiSourceWebRtcPusher *ptr) {
+    MultiSourceWebRtcPusher::Ptr pusher(new MultiSourceWebRtcPusher(poller, info), [](MultiSourceWebRtcPusher *ptr) {
         ptr->onDestory();
         delete ptr;
     });
@@ -43,13 +61,9 @@ MultiSourceWebRtcPusher::Ptr MultiSourceWebRtcPusher::create(const EventPoller::
     return pusher;
 }
 
-MultiSourceWebRtcPusher::MultiSourceWebRtcPusher(const EventPoller::Ptr &poller,
-                                                 const MediaInfo &info,
-                                                 const ProtocolOption &option)
+MultiSourceWebRtcPusher::MultiSourceWebRtcPusher(const EventPoller::Ptr &poller, const MediaInfo &info)
     : WebRtcTransportImp(poller)
-    , _media_info(info) {
-    // ProtocolOption does not apply to the batch's sources: each one is a plain RtspMediaSource.
-}
+    , _media_info(info) {}
 
 const MediaInfo &MultiSourceWebRtcPusher::getMediaInfo() const {
     return _media_info;
@@ -111,7 +125,7 @@ float MultiSourceWebRtcPusher::getLossRate(MediaSource &sender, TrackType type) 
 
 void MultiSourceWebRtcPusher::onDestory() {
     if (_batch_session) {
-        _batch_session->clearAllSources();
+        _batch_session->closeAndReleaseAllSources();
         BatchPublishSessionManager::Instance().removeSession(_batch_session->getApp(), _batch_session->getNvrId(), _batch_session);
         InfoL << "batch session closed, app=" << _batch_session->getApp() << ", nvrId=" << _batch_session->getNvrId()
               << ", transportId=" << getIdentifier();
@@ -273,9 +287,9 @@ void MultiSourceWebRtcPusher::handleUnbind(const Json::Value &root,
     }
 
     string slot_id;
-    bool reused = false;
-    _batch_session->unbindSource(source_id, slot_id, reused);
-    sendReply("whip.unbind", request_id, source_id, slot_id, dc_stream_id, ppid, kCodeSuccess, reused ? "reused" : "");
+    bool not_bound = false;
+    _batch_session->unbindSource(source_id, slot_id, not_bound);
+    sendReply("whip.unbind", request_id, source_id, slot_id, dc_stream_id, ppid, kCodeSuccess, not_bound ? "notBound" : "");
 }
 
 bool MultiSourceWebRtcPusher::checkSourceArgs(const string &act,
@@ -287,9 +301,10 @@ bool MultiSourceWebRtcPusher::checkSourceArgs(const string &act,
     auto nvr_id = data["nvrId"].isString() ? data["nvrId"].asString() : "";
     source_id = data["sourceId"].isString() ? data["sourceId"].asString() : "";
     const char *reason = nullptr;
-    if (nvr_id.empty() || nvr_id != _media_info.stream) {
+    // The session's stream (nvrId) is never empty, so a missing nvrId fails the comparison too.
+    if (nvr_id != _media_info.stream) {
         reason = "invalidNvrId";
-    } else if (source_id.empty()) {
+    } else if (!isValidSourceId(source_id)) {
         reason = "invalidSourceId";
     }
     if (!reason) {

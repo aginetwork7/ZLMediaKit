@@ -1970,13 +1970,14 @@ void push_batch_plugin(SocketHelper& sender, const WebRtcArgs &args, const onCre
     info.authorization = args["Authorization"].data();
 
     // A new batch session replaces the existing one for the same app/nvrId; stream count comes from the offer.
-    Broadcast::PublishAuthInvoker invoker = [cb, info](const string &err, const ProtocolOption &option) mutable {
+    // ProtocolOption does not apply to the batch's sources: each one is a plain RtspMediaSource.
+    Broadcast::PublishAuthInvoker invoker = [cb, info](const string &err, const ProtocolOption &) mutable {
         if (!err.empty()) {
             cb(WebRtcException(SockException(Err_other, err)));
             return;
         }
 
-        auto rtc = MultiSourceWebRtcPusher::create(EventPollerPool::Instance().getPoller(), info, option,
+        auto rtc = MultiSourceWebRtcPusher::create(EventPollerPool::Instance().getPoller(), info,
             WebRtcTransport::Role::PEER, WebRtcTransport::SignalingProtocols::WHEP_WHIP);
         cb(*rtc);
     };
@@ -1987,37 +1988,40 @@ void push_batch_plugin(SocketHelper& sender, const WebRtcArgs &args, const onCre
     }
 }
 
+// Maps the signaling entrypoint (WebRtcSessionNames::kSource*) and plugin type to a WebRtcSessionNames::kType*
+// value. Unknown combinations keep the <source>_<type> fallback so new entrypoints stay visible.
 static string getWebRtcSessionType(const string &source, const string &type) {
-    if (source == "whep" && type == "play") {
-        return "whep_player";
+    using namespace WebRtcSessionNames;
+    if (source == kSourceWhep && type == "play") {
+        return kTypeWhepPlayer;
     }
-    if (source == "whip" && type == "push") {
-        return "whip_publisher";
+    if (source == kSourceWhip && type == "push") {
+        return kTypeWhipPublisher;
     }
-    if (source == "whip_batch" && type == "push_batch") {
-        return "whip_batch_publisher";
+    if (source == kSourceWhipBatch && type == "push_batch") {
+        return kTypeWhipBatchPublisher;
     }
-    if (source == "webrtc_api") {
+    if (source == kSourceWebRtcApi) {
         if (type == "play") {
-            return "webrtc_api_player";
+            return kTypeWebRtcApiPlayer;
         }
         if (type == "push") {
-            return "webrtc_api_publisher";
+            return kTypeWebRtcApiPublisher;
         }
     }
-    if (source == "websocket") {
+    if (source == kSourceWebsocket) {
         if (type == "play") {
-            return "websocket_player";
+            return kTypeWebsocketPlayer;
         }
         if (type == "push") {
-            return "websocket_publisher";
+            return kTypeWebsocketPublisher;
         }
     }
     return source.empty() ? type : source + "_" + type;
 }
 
 static void setWebRtcArgs(const WebRtcArgs &args, const string &type, WebRtcInterface &rtc) {
-    rtc.setSessionType(getWebRtcSessionType(args["session_source"], type));
+    rtc.setSessionType(getWebRtcSessionType(args[WebRtcSessionNames::kSourceKey], type));
     {
         static auto is_vaild_ip = [](const std::string &ip) -> bool {
             int a, b, c, d;

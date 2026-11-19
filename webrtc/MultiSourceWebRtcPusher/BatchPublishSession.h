@@ -80,19 +80,33 @@ public:
     // Listener of every source this session creates (the owning batch pusher).
     void setListener(std::weak_ptr<MediaSourceEvent> listener);
 
+    // Builds the slots from the negotiated answer and moves the session to Active. Application
+    // m-lines are skipped; the rest must be audio/video pairs in that order (audio, video, audio,
+    // video, ...), and the pair count must equal slot_count. Slot i takes pair i and is named
+    // "<i>"; each slot keeps both MIDs and the a=ssrc of each m-line (0 when absent). rtsp_sdp is
+    // the SDP every source of the session is created with. Returns false, with the session left
+    // Negotiated and no slots, on any layout error; the caller then rejects the offer.
     bool initFromSdp(const RtcSession &answer_sdp, const std::string &rtsp_sdp);
 
     // Binds source_id to a free slot, or returns the slot it already holds (reused=true; a repeated
     // bind refreshes max_viewers and lets a rejected source retry registration). Returns false with a
     // reason when the session is not active or no slot is free.
     bool bindSource(const std::string &source_id, size_t max_viewers, std::string &slot_id, bool &reused, std::string &reason);
-    // Releases source_id's slot and unregisters its MediaSource. Idempotent: reused=true means
+    // Releases source_id's slot and unregisters its MediaSource. Idempotent: not_bound=true means
     // source_id was not bound, and slot_id is then left unchanged.
-    void unbindSource(const std::string &source_id, std::string &slot_id, bool &reused);
+    void unbindSource(const std::string &source_id, std::string &slot_id, bool &not_bound);
 
-    // Releases every source; called when the session's transport is destroyed or replaced.
-    void clearAllSources();
+    // Closes the session (state Closed, so every later bindSource fails) and releases every source
+    // and slot; called when the session's transport is destroyed or replaced by a newer one.
+    void closeAndReleaseAllSources();
 
+    // Routes one RTP packet to the source bound on its slot. The slot is found by MID first, then
+    // by the m-line's SSRC (learned from the first packet when the SDP had none). The first write
+    // of a source registers its stream. Returns false, and drops the packet, when no slot matches,
+    // the slot has no source, the source's registration was rejected (until it is bound again), or
+    // the write throws (the source is then marked rejected). Holds the session lock for the whole
+    // call, including the write: closeAndReleaseAllSources/unbindSource may run on another poller
+    // and must not unregister a source while a packet is still being written to it.
     bool onRtp(TrackType type, const std::string &mid, uint32_t ssrc, uint64_t stamp_ms, const RtpPacket::Ptr &rtp);
 
     Json::Value getInfo() const;

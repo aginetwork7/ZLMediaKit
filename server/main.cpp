@@ -263,19 +263,26 @@ string g_ini_file;
 
 static const string kHookBaseUrlPlaceholder = "__HOOK_BASE_URL__";
 
-static void replaceHookBaseUrl(string hook_base_url) {
-    if (hook_base_url.empty()) {
-        return;
+// Replaces every placeholder in value with hook_base_url (trailing '/' removed); returns false when
+// there is nothing to replace.
+static bool replaceHookBaseUrlIn(string &value, string hook_base_url) {
+    if (hook_base_url.empty() || value.find(kHookBaseUrlPlaceholder) == string::npos) {
+        return false;
     }
     while (hook_base_url.size() > 1 && hook_base_url.back() == '/') {
         hook_base_url.pop_back();
     }
+    size_t pos = 0;
+    while ((pos = value.find(kHookBaseUrlPlaceholder, pos)) != string::npos) {
+        value.replace(pos, kHookBaseUrlPlaceholder.size(), hook_base_url);
+        pos += hook_base_url.size();
+    }
+    return true;
+}
+
+static void replaceHookBaseUrl(const string &hook_base_url) {
     for (auto &pr : mINI::Instance()) {
-        size_t pos = 0;
-        while ((pos = pr.second.find(kHookBaseUrlPlaceholder, pos)) != string::npos) {
-            pr.second.replace(pos, kHookBaseUrlPlaceholder.size(), hook_base_url);
-            pos += hook_base_url.size();
-        }
+        replaceHookBaseUrlIn(pr.second, hook_base_url);
     }
 }
 
@@ -293,6 +300,47 @@ static void applyCliOverrides() {
     if (!g_cli_api_secret.empty()) {
         mINI::Instance()[API::kSecret] = g_cli_api_secret;
     }
+}
+
+void saveIniFile() {
+    auto &ini = mINI::Instance();
+    if (g_cli_hook_base_url.empty() && g_cli_media_server_id.empty() && g_cli_api_secret.empty()) {
+        ini.dumpFile(g_ini_file);
+        return;
+    }
+    mINI on_disk;
+    try {
+        on_disk.parseFile(g_ini_file);
+    } catch (std::exception &ex) {
+        WarnL << "read config file failed, " << g_ini_file << ": " << ex.what();
+    }
+    auto to_save = ini;
+    for (auto it = to_save.begin(); it != to_save.end();) {
+        auto file_it = on_disk.find(it->first);
+        // The value the command line gave this key, or empty when it does not override it.
+        string cli_value;
+        if (!g_cli_media_server_id.empty() && it->first == General::kMediaServerId) {
+            cli_value = g_cli_media_server_id;
+        } else if (!g_cli_api_secret.empty() && it->first == API::kSecret) {
+            cli_value = g_cli_api_secret;
+        } else if (file_it != on_disk.end()) {
+            string resolved = file_it->second;
+            if (replaceHookBaseUrlIn(resolved, g_cli_hook_base_url)) {
+                cli_value = resolved;
+            }
+        }
+        // Keep the file's own value while the key still holds the command-line value; a value set
+        // through setServerConfig since then is saved as is.
+        if (cli_value.empty() || it->second != cli_value) {
+            ++it;
+        } else if (file_it != on_disk.end()) {
+            it->second = file_it->second;
+            ++it;
+        } else {
+            it = to_save.erase(it);
+        }
+    }
+    to_save.dumpFile(g_ini_file);
 }
 
 // Returns the first config key whose value still holds the hook base url placeholder.
@@ -445,7 +493,7 @@ int start_main(int argc,char *argv[]) {
             // 使用默认secret被禁止启动  [AUTO-TRANSLATED:6295164b]
             // Starting with the default secret is prohibited
             secret = makeRandStr(32, true);
-            mINI::Instance().dumpFile(g_ini_file);
+            saveIniFile();
             WarnL << "The " << API::kSecret << " is invalid, modified it to: " << secret
                   << ", saved config file: " << g_ini_file;
         }

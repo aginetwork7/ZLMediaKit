@@ -61,6 +61,28 @@ extern const std::string kExternIP;
 extern const std::string kInterfaces;
 }//namespace RTC
 
+// WebRTC session classification shared by the signaling entrypoints, the transport and the
+// connection-list API. Compare against these constants instead of string literals.
+namespace WebRtcSessionNames {
+// WebRtcArgs key that carries the entrypoint (one of the kSource* values).
+static constexpr char kSourceKey[] = "session_source";
+// Signaling entrypoint that created the transport.
+static constexpr char kSourceWhip[] = "whip";
+static constexpr char kSourceWhep[] = "whep";
+static constexpr char kSourceWhipBatch[] = "whip_batch";
+static constexpr char kSourceWebRtcApi[] = "webrtc_api";
+static constexpr char kSourceWebsocket[] = "websocket";
+// Session type stored on the transport (see getWebRtcSessionType in WebRtcTransport.cpp).
+// Unknown entrypoints fall back to <source>_<type>, or <type> when the source is empty.
+static constexpr char kTypeWhepPlayer[] = "whep_player";
+static constexpr char kTypeWhipPublisher[] = "whip_publisher";
+static constexpr char kTypeWhipBatchPublisher[] = "whip_batch_publisher";
+static constexpr char kTypeWebRtcApiPlayer[] = "webrtc_api_player";
+static constexpr char kTypeWebRtcApiPublisher[] = "webrtc_api_publisher";
+static constexpr char kTypeWebsocketPlayer[] = "websocket_player";
+static constexpr char kTypeWebsocketPublisher[] = "websocket_publisher";
+} // namespace WebRtcSessionNames
+
 class WebRtcInterface {
 public:
     virtual ~WebRtcInterface() = default;
@@ -173,9 +195,8 @@ public:
     SignalingProtocols getSignalingProtocols() const { return _signaling_protocols; }
     void setSignalingProtocols(SignalingProtocols signaling_protocols) { _signaling_protocols = signaling_protocols; }
     // The session type is set by the signaling callback after the transport is registered, while
-    // the connection list API may read it from another thread. Values (getWebRtcSessionType in
-    // WebRtcTransport.cpp): whep_player, whip_publisher, whip_batch_publisher, webrtc_api_player,
-    // webrtc_api_publisher, websocket_player, websocket_publisher, otherwise <source>_<type> or <type>.
+    // the connection list API may read it from another thread. Values: the WebRtcSessionNames::kType*
+    // constants, otherwise <source>_<type> or <type>.
     std::string getSessionType() const {
         std::lock_guard<std::mutex> lck(_session_type_mtx);
         return _session_type;
@@ -184,9 +205,12 @@ public:
         std::lock_guard<std::mutex> lck(_session_type_mtx);
         _session_type = std::move(session_type);
     }
-    // whip_publisher or whip_batch_publisher.
-    bool isWhipPublisher() const { return toolkit::start_with(getSessionType(), "whip"); }
-    bool isWhepPlayer() const { return getSessionType() == "whep_player"; }
+    // WHIP single-stream or batch publisher.
+    bool isWhipPublisher() const {
+        auto type = getSessionType();
+        return type == WebRtcSessionNames::kTypeWhipPublisher || type == WebRtcSessionNames::kTypeWhipBatchPublisher;
+    }
+    bool isWhepPlayer() const { return getSessionType() == WebRtcSessionNames::kTypeWhepPlayer; }
 
     float getTimeOutSec() const;
 

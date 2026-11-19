@@ -836,12 +836,11 @@ template void check_secret<std::string>(toolkit::SockInfo &, mediakit::HttpSessi
 
 #ifdef ENABLE_WEBRTC
 static string getWebRtcSignalingLabel(const WebRtcTransportImp &transport) {
-    auto session_type = transport.getSessionType();
-    if (start_with(session_type, "whip")) {
-        return "whip";
+    if (transport.isWhipPublisher()) {
+        return WebRtcSessionNames::kSourceWhip;
     }
-    if (start_with(session_type, "whep")) {
-        return "whep";
+    if (transport.isWhepPlayer()) {
+        return WebRtcSessionNames::kSourceWhep;
     }
     return WebRtcTransport::SignalingProtocolsStr(transport.getSignalingProtocols());
 }
@@ -934,7 +933,7 @@ void installWebApi() {
         }
         if (changed > 0) {
             NOTICE_EMIT(BroadcastReloadConfigArgs, Broadcast::kBroadcastReloadConfig);
-            ini.dumpFile(g_ini_file);
+            saveIniFile();
         }
         val["changed"] = changed;
     });
@@ -2262,7 +2261,7 @@ void installWebApi() {
         CHECK(!offer.empty(), "http body(webrtc offer sdp) is empty");
 
         auto &session = static_cast<Session&>(sender);
-        auto args = std::make_shared<WebRtcArgsImp<std::string>>(allArgs, sender.getIdentifier(), "webrtc_api");
+        auto args = std::make_shared<WebRtcArgsImp<std::string>>(allArgs, sender.getIdentifier(), WebRtcSessionNames::kSourceWebRtcApi);
         WebRtcPluginManager::Instance().negotiateSdp(session, type, *args, [invoker, val, offer, headerOut](const WebRtcInterface &exchanger) mutable {
             auto &handler = const_cast<WebRtcInterface &>(exchanger);
             try {
@@ -2307,9 +2306,9 @@ void installWebApi() {
         });
     };
 
-    api_regist("/index/api/whip", [](API_ARGS_STRING_ASYNC) { whip_whep_func("push", "whip", API_ARGS_VALUE, invoker); });
-    api_regist("/index/api/whep", [](API_ARGS_STRING_ASYNC) { whip_whep_func("play", "whep", API_ARGS_VALUE, invoker); });
-    api_regist("/index/api/whipBatch", [](API_ARGS_STRING_ASYNC) { whip_whep_func("push_batch", "whip_batch", API_ARGS_VALUE, invoker); });
+    api_regist("/index/api/whip", [](API_ARGS_STRING_ASYNC) { whip_whep_func("push", WebRtcSessionNames::kSourceWhip, API_ARGS_VALUE, invoker); });
+    api_regist("/index/api/whep", [](API_ARGS_STRING_ASYNC) { whip_whep_func("play", WebRtcSessionNames::kSourceWhep, API_ARGS_VALUE, invoker); });
+    api_regist("/index/api/whipBatch", [](API_ARGS_STRING_ASYNC) { whip_whep_func("push_batch", WebRtcSessionNames::kSourceWhipBatch, API_ARGS_VALUE, invoker); });
 
     static auto get_whip_batch_info = [](API_ARGS_MAP) {
         CHECK_SECRET();
@@ -2413,10 +2412,9 @@ void installWebApi() {
                 item["app"] = media_info.app;
                 item["stream"] = media_info.stream;
                 item["batch"] = BatchPublishSessionManager::Instance().getSessionSummary(media_info.app, media_info.stream);
+                // Always present for WHIP and batch parents: 0 means no WHEP viewer.
                 auto viewers = viewer_count_by_parent.find(transport->getIdentifier());
-                if (viewers != viewer_count_by_parent.end()) {
-                    item["viewerCount"] = viewers->second;
-                }
+                item["viewerCount"] = viewers != viewer_count_by_parent.end() ? viewers->second : (Json::UInt64)0;
             } else if (auto player = std::dynamic_pointer_cast<WebRtcPlayer>(transport)) {
                 auto media_info = player->getMediaInfo();
                 item["app"] = media_info.app;
@@ -2433,9 +2431,7 @@ void installWebApi() {
                 item["stream"] = media_info.stream;
                 if (transport->isWhipPublisher()) {
                     auto viewers = viewer_count_by_parent.find(transport->getIdentifier());
-                    if (viewers != viewer_count_by_parent.end()) {
-                        item["viewerCount"] = viewers->second;
-                    }
+                    item["viewerCount"] = viewers != viewer_count_by_parent.end() ? viewers->second : (Json::UInt64)0;
                 }
             } else if (auto talk = std::dynamic_pointer_cast<WebRtcTalk>(transport)) {
                 auto &media_info = talk->getMediaInfo();

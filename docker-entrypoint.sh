@@ -30,13 +30,30 @@ esac
 
 HOOK_BASE_URL=${MEDIA_SERVICE_HOOK_BASE_URL%/}
 
-# 改写容器内的配置副本（保留文件 inode，兼容被挂载的配置文件）。
+# 改写容器内的配置副本（保留文件 inode，兼容被挂载的配置文件）。写回前先备份；写回失败时恢复备份并退出，
+# 不会留下被截断的配置让下次重启（restart: always）用残缺配置启动。
 # Rewrites the container's config copy in place (keeps the inode, so a mounted config file also works).
+# The file is backed up first. When writing it back fails (e.g. a full disk), the backup is restored and the
+# start fails, so a restart (restart: always) never runs MediaServer on a truncated config.
 rewrite_config() {
+  backup_file=$(mktemp)
   tmp_file=$(mktemp)
-  "$@" "$config_file" > "$tmp_file"
-  cat "$tmp_file" > "$config_file"
-  rm -f "$tmp_file"
+  cat "$config_file" > "$backup_file"
+  if ! "$@" "$config_file" > "$tmp_file" || [ ! -s "$tmp_file" ]; then
+    rm -f "$tmp_file" "$backup_file"
+    echo "rewrite of $config_file failed, config left unchanged" >&2
+    exit 1
+  fi
+  if ! cat "$tmp_file" > "$config_file"; then
+    if cat "$backup_file" > "$config_file"; then
+      echo "rewrite of $config_file failed, original config restored" >&2
+    else
+      echo "rewrite of $config_file failed and the original config could not be restored" >&2
+    fi
+    rm -f "$tmp_file" "$backup_file"
+    exit 1
+  fi
+  rm -f "$tmp_file" "$backup_file"
 }
 
 # secret 写入 [api] secret，不再经命令行参数传入：命令行参数对宿主机上的所有用户可见（/proc/<pid>/cmdline）。

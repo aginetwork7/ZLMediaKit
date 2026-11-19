@@ -9,6 +9,7 @@
  */
 
 #include "BatchPublishSession.h"
+#include "BatchPublishRules.h"
 
 #include <algorithm>
 #include <cctype>
@@ -38,42 +39,17 @@ bool BatchPublishSession::initFromSdp(const RtcSession &answer_sdp, const string
     _state = SessionState::Negotiated;
     _rtsp_sdp = rtsp_sdp;
 
-    vector<pair<const RtcMedia *, const RtcMedia *>> av_pairs;
-    av_pairs.reserve(_slot_count);
-
-    const RtcMedia *pending_audio = nullptr;
-    for (auto &m : answer_sdp.media) {
-        if (m.type == TrackApplication) {
-            continue;
-        }
-
-        if (!pending_audio) {
-            if (m.type != TrackAudio) {
-                WarnL << "batch sdp layout invalid, expect audio then video, app=" << _app
-                      << ", nvrId=" << _nvr_id << ", streamCount=" << _slot_count;
-                return false;
-            }
-            pending_audio = &m;
-            continue;
-        }
-
-        if (m.type != TrackVideo) {
-            WarnL << "batch sdp layout invalid, expect video after audio, app=" << _app
-                  << ", nvrId=" << _nvr_id << ", streamCount=" << _slot_count;
-            return false;
-        }
-
-        if (!m.plan.empty()) {
-            _video_vp8 = strcasecmp(m.plan[0].codec.data(), "VP8") == 0;
-        }
-        av_pairs.emplace_back(pending_audio, &m);
-        pending_audio = nullptr;
-    }
-
-    if (pending_audio) {
-        WarnL << "batch sdp layout invalid, dangling audio track without video, app=" << _app
-              << ", nvrId=" << _nvr_id << ", streamCount=" << _slot_count;
+    vector<batch::AvPair> av_pairs;
+    auto layout_error = batch::collectAvPairs(answer_sdp, av_pairs);
+    if (!layout_error.empty()) {
+        WarnL << "batch sdp layout invalid, " << layout_error << ", app=" << _app << ", nvrId=" << _nvr_id
+              << ", streamCount=" << _slot_count;
         return false;
+    }
+    for (auto &pair : av_pairs) {
+        if (!pair.second->plan.empty()) {
+            _video_vp8 = strcasecmp(pair.second->plan[0].codec.data(), "VP8") == 0;
+        }
     }
 
     if (av_pairs.size() != _slot_count) {
@@ -136,12 +112,24 @@ bool BatchPublishSession::bindSource(const string &source_id, size_t max_viewers
         // A repeated bind refreshes the viewer limit, and lets a source whose stream registration was
         // rejected (e.g. the name was still held) try again on its next RTP.
         it->second.max_viewers = max_viewers;
-        if (_rejected_sources.erase(source_id)) {
+        if (_rejected_sources.count(source_id)) {
+            if (isNameHeldByOther(source_id)) {
+                reason = "sourceIdInUse";
+                return false;
+            }
+            _rejected_sources.erase(source_id);
             InfoL << "batch source retry after rejection, app=" << _app << ", nvrId=" << _nvr_id << ", sourceId=" << source_id;
         }
         slot_id = it->second.slot_id;
         reason = "reused";
         return true;
+    }
+
+    // Another publisher holds the name: the first RTP could not register the stream, so refuse now
+    // instead of replying success to a source that would never play.
+    if (isNameHeldByOther(source_id)) {
+        reason = "sourceIdInUse";
+        return false;
     }
 
     if (!allocFreeSlotId(slot_id)) {
@@ -215,42 +203,6 @@ void BatchPublishSession::closeAndReleaseAllSources() {
     _state = SessionState::Closed;
 }
 
-// The edge publishes its packed frames as VP8 RTP payloads: start code 00 00 00 01, then a ref byte
-// with 0x20 set and a flag byte with both 0x20 and 0x80 set (& 0xA0 == 0xA0) on a key frame. Only the packet that starts a frame
-// (S=1, PID=0) is checked. Encrypted payloads never set the bits, so they have no key frames.
-static bool isEdgeKeyFrameStart(const RtpPacket::Ptr &rtp) {
-    auto payload = rtp->getPayload();
-    auto size = rtp->getPayloadSize();
-    if (size < 1 || (payload[0] & 0x17) != 0x10) {
-        return false;
-    }
-    size_t offset = 1;
-    if (payload[0] & 0x80) { // X: extension byte follows
-        if (size < 2) {
-            return false;
-        }
-        auto ext = payload[1];
-        offset = 2;
-        if (ext & 0x80) { // I: PictureID, 2 bytes when its M bit is set
-            if (size <= offset) {
-                return false;
-            }
-            offset += (payload[offset] & 0x80) ? 2 : 1;
-        }
-        if (ext & 0x40) { // L: TL0PICIDX
-            ++offset;
-        }
-        if (ext & 0x30) { // T/K: TID/KEYIDX
-            ++offset;
-        }
-    }
-    if (size < offset + 6) {
-        return false;
-    }
-    auto frame = payload + offset;
-    return frame[0] == 0 && frame[1] == 0 && frame[2] == 0 && frame[3] == 1 && (frame[4] & 0x20) && (frame[5] & 0xA0) == 0xA0;
-}
-
 bool BatchPublishSession::onRtp(TrackType type, const string &mid, uint32_t ssrc, uint64_t stamp_ms, const RtpPacket::Ptr &rtp) {
     lock_guard<recursive_mutex> lck(_mtx);
 
@@ -289,11 +241,10 @@ bool BatchPublishSession::onRtp(TrackType type, const string &mid, uint32_t ssrc
     }
 
     // Mark where an edge key frame starts so the GOP cache lets new WHEP viewers start from it.
-    // RtspMediaSourceImp::onWrite would re-detect key frames with its VP8 demuxer, which reads the edge
-    // format as all key frames, so write the raw RTP with the edge's own key frame marker.
     // The first write registers the stream; a failure only drops this source, the session goes on.
     try {
-        src->RtspMediaSource::onWrite(rtp, type == TrackVideo && _video_vp8 && isEdgeKeyFrameStart(rtp));
+        auto key_pos = type == TrackVideo && _video_vp8 && batch::isEdgeKeyFrameStart(rtp->getPayload(), rtp->getPayloadSize());
+        src->onWrite(rtp, key_pos);
     } catch (std::exception &ex) {
         WarnL << "batch source rejected, app=" << _app << ", nvrId=" << _nvr_id << ", sourceId=" << ctx->current_source_id << ": " << ex.what();
         _rejected_sources.emplace(ctx->current_source_id);
@@ -343,11 +294,11 @@ Json::Value BatchPublishSession::getInfo() const {
         item["streamId"] = it.second.slot_id;
         item["playApp"] = it.second.play_app;
         item["playStream"] = it.second.play_stream;
-        // A binding exists only while its source is online.
-        item["online"] = true;
-        // The stream registration was rejected (e.g. the name was held); RTP is dropped until the
-        // source is bound again.
-        item["rejected"] = _rejected_sources.count(it.second.source_id) > 0;
+        // The stream registration was rejected (the name was taken after the bind); RTP is dropped
+        // until the source is bound again, so a rejected source is not online.
+        auto rejected = _rejected_sources.count(it.second.source_id) > 0;
+        item["online"] = !rejected;
+        item["rejected"] = rejected;
         item["maxViewers"] = (Json::UInt64)it.second.max_viewers;
         sources.append(item);
     }
@@ -415,7 +366,7 @@ const string &BatchPublishSession::getTransportId() const {
     return _transport_id;
 }
 
-shared_ptr<RtspMediaSourceImp> BatchPublishSession::getOrCreateSource(const string &source_id) {
+BatchRtspMediaSource::Ptr BatchPublishSession::getOrCreateSource(const string &source_id) {
     auto it = _source_map.find(source_id);
     if (it != _source_map.end()) {
         return it->second;
@@ -426,12 +377,21 @@ shared_ptr<RtspMediaSourceImp> BatchPublishSession::getOrCreateSource(const stri
     tuple.app = _app;
     tuple.stream = source_id;
 
-    auto src = std::make_shared<RtspMediaSourceImp>(tuple);
+    auto src = std::make_shared<BatchRtspMediaSource>(tuple);
     src->setListener(_listener);
     src->setSdp(_rtsp_sdp);
     _source_map[source_id] = src;
     InfoL << "batch source online, app=" << _app << ", nvrId=" << _nvr_id << ", sourceId=" << source_id;
     return src;
+}
+
+bool BatchPublishSession::isNameHeldByOther(const string &source_id) const {
+    auto held = MediaSource::find(RTSP_SCHEMA, DEFAULT_VHOST, _app, source_id);
+    if (!held) {
+        return false;
+    }
+    auto it = _source_map.find(source_id);
+    return it == _source_map.end() || it->second.get() != held.get();
 }
 
 // releaseSource unregisters the stream right away: other holders (such as a getMediaList call) may
@@ -444,7 +404,7 @@ void BatchPublishSession::releaseSource(const string &source_id) {
     }
     auto src = std::move(it->second);
     _source_map.erase(it);
-    src->unregist();
+    src->release();
     InfoL << "batch source offline, app=" << _app << ", nvrId=" << _nvr_id << ", sourceId=" << source_id;
 }
 

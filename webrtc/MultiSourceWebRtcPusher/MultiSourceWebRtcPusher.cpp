@@ -10,7 +10,7 @@
 
 #include "MultiSourceWebRtcPusher.h"
 
-#include <cstring>
+#include "BatchPublishRules.h"
 #include "Util/logger.h"
 
 using namespace std;
@@ -26,24 +26,6 @@ constexpr int kCodeOtherFailed = -1;
 constexpr int kCodeInvalidArgs = -300;
 constexpr int kCodeException = -400;
 constexpr int kCodeNotFound = -500;
-
-// sourceId becomes the stream name app/sourceId that WHEP viewers play, so it must be one path
-// segment that needs no URL encoding: no '/', '\\', "..", whitespace, control or URL-reserved
-// characters, and at most kMaxSourceIdLen bytes. The edge's live and playback ids
-// (<mac>-<ch>-<sub>[-<startAt>-<endAt>-<sessionId>]) pass.
-constexpr size_t kMaxSourceIdLen = 256;
-
-bool isValidSourceId(const std::string &source_id) {
-    if (source_id.empty() || source_id.size() > kMaxSourceIdLen || source_id.find("..") != std::string::npos) {
-        return false;
-    }
-    for (unsigned char ch : source_id) {
-        if (ch <= 0x20 || ch == 0x7F || strchr("/\\?#&%\"'<>", ch)) {
-            return false;
-        }
-    }
-    return true;
-}
 }
 
 MultiSourceWebRtcPusher::Ptr MultiSourceWebRtcPusher::create(const EventPoller::Ptr &poller,
@@ -140,28 +122,16 @@ void MultiSourceWebRtcPusher::onCheckSdp(SdpType type, RtcSession &sdp) {
         return;
     }
 
-    size_t av_count = 0;
-    bool expect_audio = true;
     for (auto &m : sdp.media) {
-        if (m.type == TrackApplication) {
-            continue;
-        }
         // RTP is routed to its stream by SSRC: without a=ssrc every m-line of the same payload type
         // maps to the first one, and the RTP of all sources would be written to stream 0.
-        CHECK(m.getRtpSSRC(), "batch offer requires a=ssrc on every audio/video m-line, mid=", m.mid);
-        if (expect_audio) {
-            CHECK(m.type == TrackAudio, "batch offer layout invalid, expect audio then video");
-            expect_audio = false;
-            continue;
-        }
-        CHECK(m.type == TrackVideo, "batch offer layout invalid, expect video after audio");
-        expect_audio = true;
-        ++av_count;
+        CHECK(m.type == TrackApplication || m.getRtpSSRC(), "batch offer requires a=ssrc on every audio/video m-line, mid=", m.mid);
     }
-
-    CHECK(expect_audio, "batch offer layout invalid, dangling audio track without video");
-    CHECK(av_count > 0, "batch offer has no audio/video pair");
-    _slot_count = av_count;
+    std::vector<batch::AvPair> pairs;
+    auto layout_error = batch::collectAvPairs(sdp, pairs);
+    CHECK(layout_error.empty(), "batch offer layout invalid, ", layout_error);
+    CHECK(!pairs.empty(), "batch offer has no audio/video pair");
+    _slot_count = pairs.size();
 }
 
 void MultiSourceWebRtcPusher::onRtcConfigure(RtcConfigure &configure) const {
@@ -304,7 +274,7 @@ bool MultiSourceWebRtcPusher::checkSourceArgs(const string &act,
     // The session's stream (nvrId) is never empty, so a missing nvrId fails the comparison too.
     if (nvr_id != _media_info.stream) {
         reason = "invalidNvrId";
-    } else if (!isValidSourceId(source_id)) {
+    } else if (!batch::isValidSourceId(source_id)) {
         reason = "invalidSourceId";
     }
     if (!reason) {

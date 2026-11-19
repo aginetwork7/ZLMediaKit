@@ -85,61 +85,6 @@ using namespace Json;
 using namespace toolkit;
 using namespace mediakit;
 
-// Masks credential members at any depth: secret/token/authorization/cookie keys and "api.secret"
-// (getServerConfig returns the server config).
-static void redactJsonForLog(Json::Value &value) {
-    if (value.isArray()) {
-        for (auto &item : value) {
-            redactJsonForLog(item);
-        }
-        return;
-    }
-    if (!value.isObject()) {
-        return;
-    }
-    for (auto &key : value.getMemberNames()) {
-        auto lower = toLowerCopy(key);
-        if (isSecretQueryKey(key) || isSecretHeader(key) || lower == "api.secret") {
-            value[key] = kRedacted;
-        } else {
-            redactJsonForLog(value[key]);
-        }
-    }
-}
-
-// Response body for the api debug log: JSON responses are masked like request bodies.
-static std::string redactResponseForLog(const std::string &response) {
-    Json::Value root;
-    Json::Reader reader;
-    if (response.empty() || (response[0] != '{' && response[0] != '[') || !reader.parse(response, root)) {
-        return response;
-    }
-    redactJsonForLog(root);
-    return root.toStyledString();
-}
-
-// Request body for the api debug log, at most 4KB, with credentials masked in form and JSON bodies.
-static std::string redactBodyForLog(const Parser &parser) {
-    static constexpr size_t kMaxLogBody = 4 * 1024;
-    auto &raw = parser.content();
-    auto content_type = toLowerCopy(parser["Content-Type"]);
-    if (content_type.find("urlencoded") != std::string::npos) {
-        // Truncating first cannot reveal a value: a key cut before its '=' carries none.
-        return redactQuery(raw.size() > kMaxLogBody ? raw.substr(0, kMaxLogBody) : raw);
-    }
-    if (content_type.find("json") != std::string::npos) {
-        Json::Value root;
-        Json::Reader reader;
-        if (!reader.parse(raw, root) || !root.isObject()) {
-            return "<json, " + std::to_string(raw.size()) + " bytes>";
-        }
-        redactJsonForLog(root);
-        auto content = root.toStyledString();
-        return content.size() > kMaxLogBody ? content.substr(0, kMaxLogBody) : content;
-    }
-    return raw.size() > kMaxLogBody ? raw.substr(0, kMaxLogBody) : raw;
-}
-
 namespace API {
 #define API_FIELD "api."
 const string kApiDebug = API_FIELD"apiDebug";
@@ -350,7 +295,7 @@ static inline void addHttpListener(){
                     log << pr.first << " : " << (isSecretHeader(pr.first) ? kRedacted : pr.second) << "\r\n";
                 }
 
-                log << "# content:\r\n" << redactBodyForLog(parser) << "\r\n";
+                log << "# content:\r\n" << redactBodyForLog(parser["Content-Type"], parser.content()) << "\r\n";
 
                 if (size > 0 && size < 4 * 1024) {
                     auto response = body->readData(size);

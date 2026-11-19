@@ -21,10 +21,25 @@
 #include <vector>
 
 #include "json/json.h"
-#include "Rtsp/RtspMediaSourceImp.h"
+#include "Rtsp/RtspMediaSource.h"
 #include "webrtc/WebRtcTransport.h"
 
 namespace mediakit {
+
+// The media source of one batch source. It takes the edge's RTP as is, with the edge's own key frame
+// marker: RtspMediaSourceImp would re-detect key frames with its VP8 demuxer, which reads the edge
+// format as all key frames, and needs a muxer the batch pusher does not have. As it is not an
+// RtspMediaSourceImp, an RTSP or WHIP push to the same name is refused ("already publishing")
+// instead of taking the stream over.
+class BatchRtspMediaSource final : public RtspMediaSource {
+public:
+    using Ptr = std::shared_ptr<BatchRtspMediaSource>;
+    using RtspMediaSource::RtspMediaSource;
+
+    // Unregisters the stream now: other holders (such as a getMediaList call) may keep the object
+    // alive for a while, and the next session's stream of the same name must not collide.
+    bool release() { return unregist(); }
+};
 
 // Naming: a batch session is published as app/<nvrId>; it holds slots (one negotiated audio/video
 // m-line pair each, identified by slot_id = "0", "1", ...); each bound source (camera) is played as
@@ -90,7 +105,8 @@ public:
 
     // Binds source_id to a free slot, or returns the slot it already holds (reused=true; a repeated
     // bind refreshes max_viewers and lets a rejected source retry registration). Returns false with a
-    // reason when the session is not active or no slot is free.
+    // reason: sessionNotActive, sourceIdInUse (another publisher holds app/source_id) or
+    // noAvailableStreamId (no slot is free).
     bool bindSource(const std::string &source_id, size_t max_viewers, std::string &slot_id, bool &reused, std::string &reason);
     // Releases source_id's slot and unregisters its MediaSource. Idempotent: not_bound=true means
     // source_id was not bound, and slot_id is then left unchanged.
@@ -119,7 +135,9 @@ public:
     const std::string &getTransportId() const;
 
 private:
-    std::shared_ptr<RtspMediaSourceImp> getOrCreateSource(const std::string &source_id);
+    BatchRtspMediaSource::Ptr getOrCreateSource(const std::string &source_id);
+    // Whether app/source_id is registered by a media source other than this session's own.
+    bool isNameHeldByOther(const std::string &source_id) const;
     void releaseSource(const std::string &source_id);
     SlotContext *findSlotByMid(const std::string &mid);
     SlotContext *findSlotBySsrc(uint32_t ssrc, TrackType type);
@@ -148,7 +166,7 @@ private:
     std::unordered_map<std::string, SourceBinding> _source_bindings;
     std::unordered_map<uint32_t, std::string> _audio_ssrc_to_slot;
     std::unordered_map<uint32_t, std::string> _video_ssrc_to_slot;
-    std::unordered_map<std::string, std::shared_ptr<RtspMediaSourceImp>> _source_map;
+    std::unordered_map<std::string, BatchRtspMediaSource::Ptr> _source_map;
     // Sources whose stream could not be registered (the name is taken by another publisher); their
     // RTP is dropped until they are unbound, so one bad source never breaks the batch session.
     std::unordered_set<std::string> _rejected_sources;

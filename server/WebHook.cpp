@@ -155,38 +155,14 @@ string to_string(const HttpArgs &value) {
     return value.make();
 }
 
-// Hook body for logs. Fields masked whole: the player/device JWT ("authorization") and the API secret
-// that on_server_started/on_server_keepalive carry with the server config. "params" (the play/publish
-// url query) keeps its other values, only its media token is masked.
-// A function, not a static array: API::kSecret is defined in another translation unit.
-static const std::vector<std::string> &hookSecretFields() {
-    static const std::vector<std::string> fields { "authorization", API::kSecret };
-    return fields;
-}
-static constexpr char kHookParamsField[] = "params";
-
+// Hook body for logs, with credentials masked (see redactHookBody in LogRedact.h).
 static string to_log_string(Value value) {
-    for (auto &field : hookSecretFields()) {
-        if (value.isMember(field)) {
-            value[field] = kRedacted;
-        }
-    }
-    // isMember first: operator[] on a missing key would add "params": null to the logged body.
-    if (value.isMember(kHookParamsField) && value[kHookParamsField].isString()) {
-        value[kHookParamsField] = redactQuery(value[kHookParamsField].asString());
-    }
+    redactHookBody(value);
     return to_string(value);
 }
 
 static string to_log_string(HttpArgs value) {
-    for (auto &field : hookSecretFields()) {
-        if (value.find(field) != value.end()) {
-            value[field] = kRedacted;
-        }
-    }
-    if (value.find(kHookParamsField) != value.end()) {
-        value[kHookParamsField] = redactQuery(value[kHookParamsField]);
-    }
+    redactHookArgs(value);
     return to_string(value);
 }
 

@@ -18,15 +18,7 @@ pipeline:
             action: include
           - name: labels
             upsert: media_server_id ${MEDIA_SERVER_ID}
-    - name: netif
-      tag: host.netif
-      interface: eth0
-      interval_sec: ${METRICS_INTERVAL_SEC}
   filters:
-    - name: lua
-      match: host.netif.*
-      script: /fluent-bit/etc/netif_rates.lua
-      call: add_bps
     - name: modify
       match: host.*
       add: media_server_id ${MEDIA_SERVER_ID}
@@ -40,6 +32,6 @@ pipeline:
       # tls: true
       metrics_uri: /agi7/api/media-control/hook/on_system_metrics
       logs_uri: /agi7/api/media-control/hook/on_system_metrics
-      # media-control 以本节点的 ZLM API secret 认证上报；改用独立 token 需要 media-control 同步支持。
-      # media-control authenticates reports with this node's ZLM API secret; a separate token needs media-control support.
-      header: Authorization Bearer ${MEDIA_SERVER_SECRET}
+      # 使用 media-control 的 SYSTEM_METRICS_TOKEN 认证，不使用 ZLM 的 api.secret，fluent-bit 不持有 ZLM 管理权限。
+      # Authenticates with media-control's SYSTEM_METRICS_TOKEN, not the ZLM api.secret, so fluent-bit holds no ZLM admin rights.
+      header: Authorization Bearer ${SYSTEM_METRICS_TOKEN}

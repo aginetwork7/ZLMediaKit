@@ -32,6 +32,7 @@
 #include "Rtp/RtpServer.h"
 #include "WebApi.h"
 #include "WebHook.h"
+#include "IniSave.h"
 
 #if defined(ENABLE_MP4)
 #include "Record/MP4Recorder.h"
@@ -171,6 +172,30 @@ public:
                              "配置文件路径",/*该选项说明文字*/
                              nullptr);
 
+        (*_parser) << Option(0,/*该选项简称，如果是\x00则说明无简称*/
+                             "hook-base-url",/*该选项全称,每个选项必须有全称；不得为null或空字符串*/
+                             Option::ArgRequired,/*该选项后面必须跟值*/
+                             nullptr,/*该选项默认值*/
+                             false,/*该选项是否必须赋值，如果没有默认值且为ArgRequired时用户必须提供该参数否则将抛异常*/
+                             "替换配置中的__HOOK_BASE_URL__占位符",/*该选项说明文字*/
+                             nullptr);
+
+        (*_parser) << Option(0,/*该选项简称，如果是\x00则说明无简称*/
+                             "media-server-id",/*该选项全称,每个选项必须有全称；不得为null或空字符串*/
+                             Option::ArgRequired,/*该选项后面必须跟值*/
+                             nullptr,/*该选项默认值*/
+                             false,/*该选项是否必须赋值，如果没有默认值且为ArgRequired时用户必须提供该参数否则将抛异常*/
+                             "覆盖配置中的mediaServerId",/*该选项说明文字*/
+                             nullptr);
+
+        (*_parser) << Option(0,/*该选项简称，如果是\x00则说明无简称*/
+                             "secret",/*该选项全称,每个选项必须有全称；不得为null或空字符串*/
+                             Option::ArgRequired,/*该选项后面必须跟值*/
+                             nullptr,/*该选项默认值*/
+                             false,/*该选项是否必须赋值，如果没有默认值且为ArgRequired时用户必须提供该参数否则将抛异常*/
+                             "覆盖配置中的api.secret",/*该选项说明文字*/
+                             nullptr);
+
         (*_parser) << Option('s',/*该选项简称，如果是\x00则说明无简称*/
                              "ssl",/*该选项全称,每个选项必须有全称；不得为null或空字符串*/
                              Option::ArgRequired,/*该选项后面必须跟值*/
@@ -237,6 +262,54 @@ public:
 // Global variable, used in WebApi to save configuration files
 string g_ini_file;
 
+static void replaceHookBaseUrl(const string &hook_base_url) {
+    for (auto &pr : mINI::Instance()) {
+        replaceHookBaseUrlIn(pr.second, hook_base_url);
+    }
+}
+
+// Values given on the command line; they override the config file at startup and after every reload
+// (SIGHUP), which would otherwise bring back the file's values.
+static string g_cli_hook_base_url;
+static string g_cli_media_server_id;
+static string g_cli_api_secret;
+
+static void applyCliOverrides() {
+    replaceHookBaseUrl(g_cli_hook_base_url);
+    if (!g_cli_media_server_id.empty()) {
+        mINI::Instance()[General::kMediaServerId] = g_cli_media_server_id;
+    }
+    if (!g_cli_api_secret.empty()) {
+        mINI::Instance()[API::kSecret] = g_cli_api_secret;
+    }
+}
+
+void saveIniFile() {
+    auto &ini = mINI::Instance();
+    CliOverrides cli { g_cli_hook_base_url, g_cli_media_server_id, g_cli_api_secret, General::kMediaServerId, API::kSecret };
+    if (cli.empty()) {
+        ini.dumpFile(g_ini_file);
+        return;
+    }
+    mINI on_disk;
+    try {
+        on_disk.parseFile(g_ini_file);
+    } catch (std::exception &ex) {
+        WarnL << "read config file failed, " << g_ini_file << ": " << ex.what();
+    }
+    mergeIniForSave(ini, on_disk, cli).dumpFile(g_ini_file);
+}
+
+// Returns the first config key whose value still holds the hook base url placeholder.
+static string findUnresolvedHookBaseUrl() {
+    for (auto &pr : mINI::Instance()) {
+        if (pr.second.find(kHookBaseUrlPlaceholder) != string::npos) {
+            return pr.first;
+        }
+    }
+    return "";
+}
+
 // 加载ssl证书函数对象
 std::function<void()> g_reload_certificates;
 
@@ -301,6 +374,9 @@ int start_main(int argc,char *argv[]) {
         LogLevel logLevel = (LogLevel) cmd_main["level"].as<int>();
         logLevel = MIN(MAX(logLevel, LTrace), LError);
         g_ini_file = cmd_main["config"];
+        g_cli_hook_base_url = cmd_main.hasKey("hook-base-url") ? cmd_main["hook-base-url"] : "";
+        g_cli_media_server_id = cmd_main.hasKey("media-server-id") ? cmd_main["media-server-id"] : "";
+        g_cli_api_secret = cmd_main.hasKey("secret") ? cmd_main["secret"] : "";
         string ssl_file = cmd_main["ssl"];
         int threads = cmd_main["threads"];
         bool affinity = cmd_main["affinity"];
@@ -350,16 +426,34 @@ int start_main(int argc,char *argv[]) {
 
         // 加载配置文件，如果配置文件不存在就创建一个  [AUTO-TRANSLATED:761e7479]
         // Load configuration file, create one if it doesn't exist
-        loadIniConfig(g_ini_file.data());
+        loadIniConfig(g_ini_file.data(), applyCliOverrides);
+        auto unresolved_hook = findUnresolvedHookBaseUrl();
+        if (!unresolved_hook.empty()) {
+            if (mINI::Instance()["hook.enable"].as<bool>()) {
+                // Hooks would call an invalid url and reject every publish and play.
+                ErrorL << kHookBaseUrlPlaceholder << " is not replaced in " << unresolved_hook << ", start with --hook-base-url";
+                return EXIT_FAILURE;
+            }
+            WarnL << kHookBaseUrlPlaceholder << " is not replaced in " << unresolved_hook << " (hooks are disabled)";
+        }
+#if defined(ENABLE_WEBRTC)
+        // WHIP / whipBatch publishers are authorized only by the on_publish hook (WebRTC is off when
+        // both rtc ports are 0).
+        auto webrtc_enabled = mINI::Instance()[Rtc::kPort].as<uint16_t>() || mINI::Instance()[Rtc::kTcpPort].as<uint16_t>();
+        if (webrtc_enabled && (!mINI::Instance()["hook.enable"].as<bool>() || mINI::Instance()["hook.on_publish"].empty())) {
+            WarnL << "hook.on_publish is disabled: WHIP and whipBatch publishing is not authenticated";
+        }
+#endif
 
         auto &secret = mINI::Instance()[API::kSecret];
         if (secret == "035c73f7-bb6b-4889-a715-d9eb2d1925cc" || secret.empty()) {
             // 使用默认secret被禁止启动  [AUTO-TRANSLATED:6295164b]
             // Starting with the default secret is prohibited
             secret = makeRandStr(32, true);
-            mINI::Instance().dumpFile(g_ini_file);
-            WarnL << "The " << API::kSecret << " is invalid, modified it to: " << secret
-                  << ", saved config file: " << g_ini_file;
+            saveIniFile();
+            // The value is not logged: logs are shipped off the host. It is in the config file.
+            WarnL << "The " << API::kSecret << " is empty or the default, generated a random one and saved it to the config file: "
+                  << g_ini_file;
         }
 
         if (!File::is_dir(ssl_file)) {
@@ -562,7 +656,8 @@ int start_main(int argc,char *argv[]) {
 
 #if !defined(_WIN32)
         signal(SIGHUP, [](int) {
-            mediakit::loadIniConfig(g_ini_file.data());
+            // Re-apply the command line values the reload would overwrite.
+            mediakit::loadIniConfig(g_ini_file.data(), applyCliOverrides);
             g_reload_certificates();
         });
 #endif

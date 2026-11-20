@@ -280,7 +280,7 @@ PYBIND11_EMBEDDED_MODULE(mk_loader, m) {
 
     m.def("update_config", []() {
         NOTICE_EMIT(BroadcastReloadConfigArgs, Broadcast::kBroadcastReloadConfig);
-        mINI::Instance().dumpFile(g_ini_file);
+        saveIniFile();
         return true;
    });
 

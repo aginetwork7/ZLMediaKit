@@ -1,0 +1,93 @@
+services:
+  zlmediakit:
+    image: ${REGISTRY}/zlmediakit:${ZLM_TAG}
+    container_name: zlmediakit
+    env_file:
+      - ${PWD}/.env
+    environment:
+      MEDIA_CONFIG_TYPE: ${MEDIA_CONFIG_TYPE:-sfu}
+      # 必填，指向本环境 media-control 的 hook 根路径（旧的默认值带字面引号，从未生效）
+      MEDIA_SERVICE_HOOK_BASE_URL: ${MEDIA_SERVICE_HOOK_BASE_URL:?MEDIA_SERVICE_HOOK_BASE_URL is required}
+      MEDIA_SERVER_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}
+      # SFU 节点必填（entrypoint 同样校验），fluent-bit 也以它标识上报来源
+      MEDIA_SERVER_ID: ${MEDIA_SERVER_ID:?MEDIA_SERVER_ID is required}
+      EXTERN_IP: ${EXTERN_IP:?EXTERN_IP is required}
+    volumes:
+      - ${PWD}/log:/opt/media/bin/log
+#      - ${PWD}/conf/config.sfu.ini:/opt/media/conf/config.sfu.ini
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+    restart: always
+    networks:
+      - agi7
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      # 宿主机端口取 ZLM_HTTP_PORT（默认 8080），与 zlm-exporter 访问的端口保持一致。
+      # 安全组须限制该端口仅 nginx 或内网可访问：config.sfu.ini 信任 X-Real-IP（forwarded_ip_header）。
+      # The security group must only let nginx or the internal network reach this port: config.sfu.ini trusts X-Real-IP.
+      - "${ZLM_HTTP_PORT:-8080}:8080/tcp"
+      - "8000:8000/tcp"
+      - "8000:8000/udp"
+
+  zlm-exporter:
+    image: ${REGISTRY}/zlm-exporter:${ZLM_EXPORTER_TAG:?ZLM_EXPORTER_TAG is required}
+    container_name: zlm-exporter
+    depends_on:
+      - zlmediakit
+    environment:
+      # 经宿主机映射端口访问本环境 ZLM：同机多套环境共用 agi7 网络，服务名 zlmediakit 会解析到多个容器。
+      # ZLM_HTTP_PORT 与上面 zlmediakit 的端口映射共用同一变量
+      ZLM_API_URL: http://host.docker.internal:${ZLM_HTTP_PORT:-8080}
+      ZLM_API_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+    networks:
+      - agi7
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      # 仅允许中心 Prometheus 访问（安全组/防火墙限制来源 IP）
+      - "${ZLM_EXPORTER_PORT:-9101}:9101/tcp"
+
+  fluent-bit-zlm:
+    image: fluent/fluent-bit:5.1
+    container_name: fluent-bit-zlm
+    command:
+      - -c
+      - /fluent-bit/etc/fluent-bit.yaml
+    # depends_on:
+    #   - zlmediakit
+    # 只传入 fluent-bit.yaml 用到的变量，不加载整份 .env，避免 MEDIA_SERVER_SECRET 进入该容器
+    environment:
+      METRICS_INTERVAL_SEC: ${METRICS_INTERVAL_SEC:?METRICS_INTERVAL_SEC is required}
+      MEDIA_SERVER_ID: ${MEDIA_SERVER_ID:?MEDIA_SERVER_ID is required}
+      MEDIA_CONTROL_HOST: ${MEDIA_CONTROL_HOST:?MEDIA_CONTROL_HOST is required}
+      MEDIA_CONTROL_PORT: ${MEDIA_CONTROL_PORT:?MEDIA_CONTROL_PORT is required}
+      SYSTEM_METRICS_TOKEN: ${SYSTEM_METRICS_TOKEN:?SYSTEM_METRICS_TOKEN is required}
+    volumes:
+      - ${PWD}/conf/fluent-bit.yaml:/fluent-bit/etc/fluent-bit.yaml:ro
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    networks:
+      - agi7
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  agi7:
+    name: agi7
+    external: true

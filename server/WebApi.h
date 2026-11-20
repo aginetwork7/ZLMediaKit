@@ -28,6 +28,9 @@
 // 配置文件路径  [AUTO-TRANSLATED:8a373c2f]
 // Configuration file path
 extern std::string g_ini_file;
+// Saves the running config to g_ini_file. Keys that still hold a command-line override (--secret,
+// --media-server-id, --hook-base-url) keep the file's own value, so those values never reach the file.
+void saveIniFile();
 
 namespace mediakit {
 // //////////RTSP服务器配置///////////  [AUTO-TRANSLATED:950e1981]
@@ -351,14 +354,23 @@ public:
 template <typename Args>
 class WebRtcArgsImp : public mediakit::WebRtcArgs {
 public:
-    WebRtcArgsImp(const HttpAllArgs<Args> &args, std::string session_id)
+    WebRtcArgsImp(const HttpAllArgs<Args> &args, std::string session_id, std::string session_source = "")
         : _args(args)
-        , _session_id(std::move(session_id)) {}
+        , _session_id(std::move(session_id))
+        , _session_source(std::move(session_source)) {}
     ~WebRtcArgsImp() override = default;
 
     toolkit::variant operator[](const std::string &key) const override {
         if (key == "url") {
             return getUrl();
+        }
+        if (key == mediakit::WebRtcSessionNames::kSourceKey) {
+            return _session_source;
+        }
+        if (key == "Authorization") {
+            // Forwarded to the publish/play hooks as the caller's identity: only the header counts, a
+            // query parameter of the same name must not replace it.
+            return getValue(_args.getParser().getHeader(), key);
         }
         return _args[key];
     }
@@ -375,6 +387,7 @@ private:
 private:
     HttpAllArgs<Args> _args;
     std::string _session_id;
+    std::string _session_source;
 };
 #endif
 

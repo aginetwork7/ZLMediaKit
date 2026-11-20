@@ -42,12 +42,13 @@ void HttpSession::onHttpRequest_HEAD() {
 
 void HttpSession::onHttpRequest_OPTIONS() {
     KeyValue header;
-    header.emplace("Allow", "GET, POST, HEAD, OPTIONS");
+    // DELETE ends a WHIP/WHEP session through the Location URL (delete_webrtc).
+    header.emplace("Allow", "GET, POST, HEAD, OPTIONS, DELETE");
     GET_CONFIG(bool, allow_cross_domains, Http::kAllowCrossDomains);
     if (allow_cross_domains) {
         header.emplace("Access-Control-Allow-Origin", "*");
         header.emplace("Access-Control-Allow-Headers", "*");
-        header.emplace("Access-Control-Allow-Methods", "GET, POST, HEAD, OPTIONS");
+        header.emplace("Access-Control-Allow-Methods", "GET, POST, HEAD, OPTIONS, DELETE");
     }
     header.emplace("Access-Control-Allow-Credentials", "true");
     header.emplace("Access-Control-Request-Methods", "GET, POST, OPTIONS");
@@ -710,6 +711,8 @@ void HttpSession::sendResponse(int code,
     if (allow_cross_domains && !_origin.empty()) {
         headerOut.emplace("Access-Control-Allow-Origin", _origin);
         headerOut.emplace("Access-Control-Allow-Credentials", "true");
+        // Lets a cross-origin WHIP/WHEP client read the session URL it must DELETE.
+        headerOut.emplace("Access-Control-Expose-Headers", "Location");
     }
 
     if (!bClose) {

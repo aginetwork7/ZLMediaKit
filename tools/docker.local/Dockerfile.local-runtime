@@ -24,14 +24,14 @@ WORKDIR /opt/media/bin
 # Use prebuilt local artifacts only.
 # Expect these files to exist in build context:
 # - release/linux/${MODEL}/MediaServer
-# - release/linux/${MODEL}/config.ini
+# - release/linux/${MODEL}/config.media.ini (ai-box deployment config)
 # - www/* (including webassist static assets)
 # - default.pem
 COPY release/linux/${MODEL}/MediaServer /opt/media/bin/
-COPY release/linux/${MODEL}/config.ini /opt/media/conf/
+COPY release/linux/${MODEL}/config.media.ini /opt/media/conf/
 COPY www/ /opt/media/bin/www/
 COPY default.pem /opt/media/bin/
 
 EXPOSE 8089 554
 
-CMD ["./MediaServer", "-s", "default.pem", "-c", "../conf/config.ini", "--log-dir", "/opt/media/bin/log", "-l", "0"]
+CMD ["./MediaServer", "-s", "default.pem", "-c", "../conf/config.media.ini", "--hook-base-url", "http://127.0.0.1:8088/internal/media/zlm/hooks", "--log-dir", "/opt/media/bin/log", "-l", "0"]

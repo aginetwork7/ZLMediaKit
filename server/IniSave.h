@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Decides what saveIniFile writes back to the config file when values came from the command line.
  */
 

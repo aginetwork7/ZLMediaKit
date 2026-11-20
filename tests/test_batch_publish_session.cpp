@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Checks BatchPublishSession (WHIP Batch): SDP layout validation, slot binding and release,
  * session close, RTP routing by MID and SSRC, stream name conflicts, and the shared input rules
  * (sourceId format, edge key frame marker, audio/video pairing). Exits non-zero if any check fails.

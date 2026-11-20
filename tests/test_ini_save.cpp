@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Checks mergeIniForSave (server/IniSave.h): which values saveIniFile writes back to the config file
  * when --secret, --media-server-id or --hook-base-url override it. Exits non-zero if any check fails.
  */

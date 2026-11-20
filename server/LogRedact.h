@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Masks credentials before request data is written to logs.
  */
 

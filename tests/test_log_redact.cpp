@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Checks the credential masking in server/LogRedact.h. Exits non-zero if any check fails.
  */
 

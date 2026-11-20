@@ -62,9 +62,21 @@ inline std::string redactQuery(const std::string &str) {
     return out;
 }
 
-// Masks credential members at any depth: secret/token/authorization keys (also as section.key, such as
-// the "api.secret" of getServerConfig) and secret headers such as cookie.
+// Masks credentials at any depth: members with a secret/token/authorization key (also as section.key,
+// such as the "api.secret" of getServerConfig) or a secret header name such as cookie, and the query
+// credentials inside string values, such as an originUrl or params carrying "?token=...". redactQuery
+// leaves a string without such a parameter unchanged.
 inline void redactJsonForLog(Json::Value &value) {
+    if (value.isString()) {
+        auto str = value.asString();
+        if (str.find('=') != std::string::npos) {
+            auto masked = redactQuery(str);
+            if (masked != str) {
+                value = masked;
+            }
+        }
+        return;
+    }
     if (value.isArray()) {
         for (auto &item : value) {
             redactJsonForLog(item);
@@ -118,25 +130,16 @@ inline std::string redactBodyForLog(const std::string &content_type_in, const st
     return raw.size() > kMaxLogBody ? raw.substr(0, kMaxLogBody) : raw;
 }
 
-// Hook body fields masked whole: the player/device JWT ("authorization") and the API secret that
-// on_server_started/on_server_keepalive carry with the server config ("api.secret"). "params" (the
-// play/publish url query) keeps its other values, only its media token is masked.
+// Hook body fields masked whole in a form hook body: the player/device JWT ("authorization") and the
+// API secret that on_server_started/on_server_keepalive carry with the server config ("api.secret").
+// "params" (the play/publish url query) keeps its other values, only its media token is masked.
 static constexpr const char *kHookSecretFields[] = { "authorization", "api.secret" };
 static constexpr char kHookParamsField[] = "params";
 
+// A JSON hook body is masked like an API body: secret members at any depth (authorization, api.secret)
+// and query credentials in any string value (params, originUrl, ...).
 inline void redactHookBody(Json::Value &value) {
-    if (!value.isObject()) {
-        return;
-    }
-    for (auto field : kHookSecretFields) {
-        if (value.isMember(field)) {
-            value[field] = kRedacted;
-        }
-    }
-    // isMember first: operator[] on a missing key would add "params": null to the logged body.
-    if (value.isMember(kHookParamsField) && value[kHookParamsField].isString()) {
-        value[kHookParamsField] = redactQuery(value[kHookParamsField].asString());
-    }
+    redactJsonForLog(value);
 }
 
 // The same for a form hook body (HttpArgs or any map of string-convertible values).

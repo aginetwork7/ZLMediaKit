@@ -307,14 +307,14 @@ void MultiSourceWebRtcPusher::sendReply(const string &act,
     }
     root["data"] = std::move(data);
 
-    if (err_code != kCodeSuccess || !err_reason.empty()) {
-        Json::Value err;
-        err["code"] = err_code;
-        if (!err_reason.empty()) {
-            err["reason"] = err_reason;
-        }
-        root["error"] = std::move(err);
+    // Every reply carries error.code (0 is success); reason is set on failures and on the successes
+    // "reused" and "notBound".
+    Json::Value err;
+    err["code"] = err_code;
+    if (!err_reason.empty()) {
+        err["reason"] = err_reason;
     }
+    root["error"] = std::move(err);
 
     auto payload = root.toStyledString();
     sendDatachannel(dc_stream_id, ppid, payload.data(), payload.size());

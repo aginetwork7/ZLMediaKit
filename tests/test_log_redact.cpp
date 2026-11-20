@@ -56,6 +56,14 @@ static void testJson() {
     expectEq("deep authorization", deep["a"]["b"]["Authorization"].asString(), kRedacted);
     expectEq("deep cookie", deep["a"]["b"]["Cookie"].asString(), kRedacted);
 
+    // Query credentials inside string values, at any depth; other strings are kept as they are.
+    auto urls = parse(R"({"data":[{"originUrl":"rtsp://h/live/s1?token=t&vhost=v","app":"a=b","sdp":"v=0\r\na=rtpmap:96 H264/90000","url":"http://h/x?app=live"}]})");
+    redactJsonForLog(urls);
+    expectEq("url token", urls["data"][0]["originUrl"].asString(), "rtsp://h/live/s1?token=***&vhost=v");
+    expectEq("plain pair", urls["data"][0]["app"].asString(), "a=b");
+    expectEq("sdp", urls["data"][0]["sdp"].asString(), "v=0\r\na=rtpmap:96 H264/90000");
+    expectEq("url without token", urls["data"][0]["url"].asString(), "http://h/x?app=live");
+
     auto response = redactResponseForLog(R"({"code":0,"data":[{"api.secret":"s"}]})");
     expectTrue("response masked", response.find("\"s\"") == string::npos && response.find(kRedacted) != string::npos);
     expectEq("response not json", redactResponseForLog("plain text"), "plain text");
@@ -88,6 +96,12 @@ static void testHook() {
     expectEq("hook api.secret", body["api.secret"].asString(), kRedacted);
     expectEq("hook params", body["params"].asString(), "a=1&token=***");
     expectEq("hook other", body["app"].asString(), "live");
+
+    // Nested media info in a hook body: its originUrl token is masked too.
+    auto nested = parse(R"({"mediaInfo":{"originUrl":"webrtc://h/live/s1?token=t"},"schema":"rtsp"})");
+    redactHookBody(nested);
+    expectEq("hook nested url", nested["mediaInfo"]["originUrl"].asString(), "webrtc://h/live/s1?token=***");
+    expectEq("hook nested other", nested["schema"].asString(), "rtsp");
 
     // A missing params is not added.
     auto plain = parse(R"({"app":"live"})");

@@ -71,9 +71,6 @@ services:
       SYSTEM_METRICS_TOKEN: ${SYSTEM_METRICS_TOKEN:?SYSTEM_METRICS_TOKEN is required}
     volumes:
       - ${PWD}/conf/fluent-bit.yaml:/fluent-bit/etc/fluent-bit.yaml:ro
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-    pid: host
     restart: always
     deploy:
       resources:

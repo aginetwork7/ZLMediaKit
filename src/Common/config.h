@@ -31,7 +31,9 @@ class ProtocolOption;
 // The default configuration file name is /path/to/your/exe.ini
 // 加载配置文件成功后返回true，否则返回false  [AUTO-TRANSLATED:cba43e43]
 // Returns true if the configuration file is loaded successfully, otherwise returns false.
-bool loadIniConfig(const char *ini_path = nullptr);
+// on_loaded runs on the loaded values before modules are told to reload them, e.g. to re-apply
+// command line overrides.
+bool loadIniConfig(const char *ini_path = nullptr, const std::function<void()> &on_loaded = nullptr);
 
 // //////////广播名称///////////  [AUTO-TRANSLATED:439b2d74]
 // //////////Broadcast Name///////////
@@ -175,7 +177,11 @@ extern const std::string kBroadcastCreateMuxer;
             return;                                                                                                    \
         }                                                                                                              \
         arg = arg##_tmp;                                                                                               \
-        InfoL << "reload config:" << key << "=" << arg;                                                                \
+        if (std::string(key).find("secret") != std::string::npos) {                                                    \
+            InfoL << "reload config:" << key << "=***";                                                                \
+        } else {                                                                                                       \
+            InfoL << "reload config:" << key << "=" << arg;                                                            \
+        }                                                                                                              \
     } while (0)
 
 // 监听某个配置发送变更  [AUTO-TRANSLATED:7f46b5b1]

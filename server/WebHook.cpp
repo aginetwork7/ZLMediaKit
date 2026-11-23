@@ -21,6 +21,7 @@
 #include "Player/PlayerProxy.h"
 #include "WebHook.h"
 #include "WebApi.h"
+#include "LogRedact.h"
 
 #if defined(ENABLE_PYTHON)
 #include "pyinvoker.h"
@@ -154,6 +155,17 @@ string to_string(const HttpArgs &value) {
     return value.make();
 }
 
+// Hook body for logs, with credentials masked (see redactHookBody in LogRedact.h).
+static string to_log_string(Value value) {
+    redactHookBody(value);
+    return to_string(value);
+}
+
+static string to_log_string(HttpArgs value) {
+    redactHookArgs(value);
+    return to_string(value);
+}
+
 const char *getContentType(const Value &value) {
     return "application/json";
 }
@@ -193,13 +205,14 @@ void do_http_hook(const string &url, const ArgsType &body, const function<void(c
         requester->addHeader("X-VHOST", vhost);
     }
     Ticker ticker;
-    requester->startRequester(url, [url, func, bodyStr, body, requester, ticker, retry](const SockException &ex, const Parser &res) mutable {
+    // The masked body is built only when a failure or slow hook is logged.
+    requester->startRequester(url, [url, func, body, requester, ticker, retry](const SockException &ex, const Parser &res) mutable {
         onceToken token(nullptr, [&]() mutable { requester.reset(); });
         parse_http_response(ex, res, [&](const Value &obj, const string &err, bool should_retry) {
             if (!err.empty()) {
                 // hook失败  [AUTO-TRANSLATED:68231f46]
                 // Hook failed
-                WarnL << "hook " << url << " " << ticker.elapsedTime() << "ms,failed" << err << ":" << bodyStr;
+                WarnL << "hook " << redactStringForLog(url) << " " << ticker.elapsedTime() << "ms,failed" << err << ":" << to_log_string(body);
 
                 if (retry-- > 0 && should_retry) {
                     requester->getPoller()->doDelayTask(MAX(retry_delay, 0.0) * 1000, [url, body, func, retry] {
@@ -214,7 +227,7 @@ void do_http_hook(const string &url, const ArgsType &body, const function<void(c
             } else if (ticker.elapsedTime() > 500) {
                 // hook成功，但是hook响应超过500ms，打印警告日志  [AUTO-TRANSLATED:e03557aa]
                 // Hook succeeded, but hook response exceeded 500ms, print warning log
-                DebugL << "hook " << url << " " << ticker.elapsedTime() << "ms,success:" << bodyStr;
+                DebugL << "hook " << redactStringForLog(url) << " " << ticker.elapsedTime() << "ms,success:" << to_log_string(body);
             }
 
             if (func) {
@@ -241,6 +254,9 @@ ArgsType make_json(const MediaInfo &args) {
     }
     dumpMediaTuple(args, body);
     body["params"] = args.params;
+    if (!args.authorization.empty()) {
+        body["authorization"] = args.authorization;
+    }
     return body;
 }
 

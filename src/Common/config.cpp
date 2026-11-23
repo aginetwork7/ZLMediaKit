@@ -22,7 +22,7 @@ using namespace toolkit;
 
 namespace mediakit {
 
-bool loadIniConfig(const char *ini_path) {
+bool loadIniConfig(const char *ini_path, const std::function<void()> &on_loaded) {
     string ini;
     if (ini_path && ini_path[0] != '\0') {
         ini = ini_path;
@@ -46,11 +46,17 @@ bool loadIniConfig(const char *ini_path) {
         }
         // 更新注释和排序
         ref.updateFrom(tmp);
+        if (on_loaded) {
+            on_loaded();
+        }
         NOTICE_EMIT(BroadcastReloadConfigArgs, Broadcast::kBroadcastReloadConfig);
         return true;
     } catch (std::exception &) {
         InfoL << "dump ini file to:" << ini;
         mINI::Instance().dumpFile(ini);
+        if (on_loaded) {
+            on_loaded();
+        }
         return false;
     }
 }

@@ -385,6 +385,8 @@ public:
     std::string full_url;
     std::string schema;
     std::string host;
+    // Authorization header of the WebRTC signaling request, forwarded to the publish/play hooks.
+    std::string authorization;
 };
 
 bool equalMediaTuple(const MediaTuple& a, const MediaTuple& b);
@@ -549,11 +551,12 @@ protected:
     // 媒体注册  [AUTO-TRANSLATED:dbf5c730]
     // Media registration
     void regist();
-
-private:
     // 媒体注销  [AUTO-TRANSLATED:06a0630a]
     // Media unregistration
+    // Protected so a subclass can drop the name before the object dies (batch WHIP sources).
     bool unregist();
+
+private:
     // 触发媒体事件  [AUTO-TRANSLATED:0c2f9ae6]
     // Trigger media events
     void emitEvent(bool regist);

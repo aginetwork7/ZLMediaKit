@@ -151,12 +151,12 @@ echo "[1/4] Build Linux binary in container via bind mount (${PLATFORM}, MODEL=$
   -v "${ROOT_DIR}:/workspace" \
   -w /workspace \
   "${BUILD_IMAGE}" \
-  /bin/bash -lc "set -euo pipefail; mkdir -p '/workspace/${LINUX_BUILD_DIR_REL}' '/workspace/${LOCAL_RELEASE_DIR_REL}' && cd '/workspace/${LINUX_BUILD_DIR_REL}' && cmake -DENABLE_PYTHON=true -DCMAKE_BUILD_TYPE='${MODEL}' -DENABLE_WEBRTC=true -DENABLE_FFMPEG=true -DENABLE_TESTS=false -DENABLE_API=false /workspace && make -j \$(nproc) && cp '/workspace/release/linux/${MODEL}/MediaServer' '/workspace/${LOCAL_RELEASE_DIR_REL}/MediaServer' && cp '/workspace/release/linux/${MODEL}/config.ini' '/workspace/${LOCAL_RELEASE_DIR_REL}/config.ini'"
+  /bin/bash -lc "set -euo pipefail; mkdir -p '/workspace/${LINUX_BUILD_DIR_REL}' '/workspace/${LOCAL_RELEASE_DIR_REL}' && cd '/workspace/${LINUX_BUILD_DIR_REL}' && cmake -DENABLE_PYTHON=true -DCMAKE_BUILD_TYPE='${MODEL}' -DENABLE_WEBRTC=true -DENABLE_FFMPEG=true -DENABLE_TESTS=false -DENABLE_API=false /workspace && make -j \$(nproc) && cp '/workspace/release/linux/${MODEL}/MediaServer' '/workspace/${LOCAL_RELEASE_DIR_REL}/MediaServer' && cp '/workspace/release/linux/${MODEL}/config.media.ini' '/workspace/${LOCAL_RELEASE_DIR_REL}/config.media.ini'"
 
 echo "[2/4] Collect required runtime artifacts..."
 mkdir -p "${TMP_CONTEXT}/release/linux/${MODEL}"
 cp "${LOCAL_RELEASE_DIR_REL}/MediaServer" "${TMP_CONTEXT}/release/linux/${MODEL}/MediaServer"
-cp "${LOCAL_RELEASE_DIR_REL}/config.ini" "${TMP_CONTEXT}/release/linux/${MODEL}/config.ini"
+cp "${LOCAL_RELEASE_DIR_REL}/config.media.ini" "${TMP_CONTEXT}/release/linux/${MODEL}/config.media.ini"
 cp -R "www" "${TMP_CONTEXT}/www"
 cp "default.pem" "${TMP_CONTEXT}/default.pem"
 
@@ -202,7 +202,7 @@ echo "Done. Runtime image: ${IMAGE_TAG}"
 echo "Mount layout switch USE_DATA_LAYOUT=${USE_DATA_LAYOUT}"
 echo "Local build output: ${LINUX_BUILD_DIR_REL}"
 echo "Local release output: ${LOCAL_RELEASE_DIR_REL}"
-echo "Runtime config source: image built-in /opt/media/conf/config.ini"
+echo "Runtime config source: image built-in /opt/media/conf/config.media.ini"
 echo ""
 echo "Run with same host/container mount paths:"
 cat <<EOF
@@ -212,5 +212,5 @@ docker run --rm -d --name zlmediakit \
   -v ${MOUNT_LOG_DIR}:${MOUNT_LOG_DIR} \
   -v ${MOUNT_RECORD_DIR}:${MOUNT_RECORD_DIR} \
   ${IMAGE_TAG} \
-  /opt/media/bin/MediaServer -s /opt/media/bin/default.pem -c /opt/media/conf/config.ini --log-dir ${MOUNT_LOG_DIR} -l 0
+  /opt/media/bin/MediaServer -s /opt/media/bin/default.pem -c /opt/media/conf/config.media.ini --hook-base-url http://127.0.0.1:8088/internal/media/zlm/hooks --log-dir ${MOUNT_LOG_DIR} -l 0
 EOF

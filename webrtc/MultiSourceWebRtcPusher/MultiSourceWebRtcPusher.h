@@ -1,0 +1,91 @@
+﻿/*
+ * Copyright (c) 2016-present The ZLMediaKit project authors. All Rights Reserved.
+ *
+ * This file is part of ZLMediaKit(https://github.com/ZLMediaKit/ZLMediaKit).
+ *
+ * Use of this source code is governed by MIT-like license that can be found in the
+ * LICENSE file in the root of the source tree. All contributing project authors
+ * may be found in the AUTHORS file in the root of the source tree.
+ */
+
+#ifndef ZLMEDIAKIT_MULTI_SOURCE_WEBRTC_PUSHER_H
+#define ZLMEDIAKIT_MULTI_SOURCE_WEBRTC_PUSHER_H
+
+#include "BatchPublishSessionManager.h"
+#include "BatchPublishSession.h"
+#include "webrtc/WebRtcTransport.h"
+
+namespace mediakit {
+
+// One WebRTC publisher (/index/api/whipBatch) carrying many sources over audio/video m-line pairs.
+// It is the listener of every source of its batch; it provides no muxer, so those sources cannot be
+// recorded, re-sent over RTP or used for talk.
+class MultiSourceWebRtcPusher : public WebRtcTransportImp, public MediaSourceEvent {
+public:
+    using Ptr = std::shared_ptr<MultiSourceWebRtcPusher>;
+
+    static Ptr create(const toolkit::EventPoller::Ptr &poller,
+                      const MediaInfo &info,
+                      WebRtcTransport::Role role,
+                      WebRtcTransport::SignalingProtocols signaling_protocols);
+
+    const MediaInfo &getMediaInfo() const;
+
+protected:
+    void onStartWebRTC() override;
+    void onDestory() override;
+    void onCheckSdp(SdpType type, RtcSession &sdp) override;
+    void onRtcConfigure(RtcConfigure &configure) const override;
+    void onRecvRtp(MediaTrack &track, const std::string &rid, RtpPacket::Ptr rtp) override;
+    bool enableDatachannelEcho() const override;
+
+    ///////MediaSourceEvent override (sources of the batch)///////
+    // A single source cannot be closed on its own; the edge releases it with whip.unbind.
+    bool close(MediaSource &sender) override;
+    int totalReaderCount(MediaSource &sender) override;
+    MediaOriginType getOriginType(MediaSource &sender) const override;
+    std::string getOriginUrl(MediaSource &sender) const override;
+    std::shared_ptr<toolkit::SockInfo> getOriginSock(MediaSource &sender) const override;
+    toolkit::EventPoller::Ptr getOwnerPoller(MediaSource &sender) override;
+    float getLossRate(MediaSource &sender, TrackType type) override;
+#ifdef ENABLE_SCTP
+    void OnSctpAssociationMessageReceived(RTC::SctpAssociation *sctpAssociation,
+                                          uint16_t streamId,
+                                          uint32_t ppid,
+                                          const uint8_t *msg,
+                                          size_t len) override;
+#endif
+
+private:
+    MultiSourceWebRtcPusher(const toolkit::EventPoller::Ptr &poller, const MediaInfo &info);
+
+    void handleBind(const Json::Value &root, const std::string &request_id, uint16_t dc_stream_id, uint32_t ppid);
+    void handleUnbind(const Json::Value &root, const std::string &request_id, uint16_t dc_stream_id, uint32_t ppid);
+    // Checks data's nvrId and sourceId; on failure replies invalidArgs and returns false.
+    bool checkSourceArgs(const std::string &act,
+                         const Json::Value &data,
+                         const std::string &request_id,
+                         uint16_t dc_stream_id,
+                         uint32_t ppid,
+                         std::string &source_id);
+    void sendReply(const std::string &act,
+                   const std::string &request_id,
+                   const std::string &source_id,
+                   const std::string &slot_id,
+                   uint16_t dc_stream_id,
+                   uint32_t ppid,
+                   int err_code,
+                   const std::string &err_reason);
+
+private:
+    MediaInfo _media_info;
+    // Derived from the offer's audio/video pair count in onCheckSdp.
+    size_t _slot_count = 0;
+    BatchPublishSession::Ptr _batch_session;
+    // Throttles the warning about dropped RTP.
+    toolkit::Ticker _drop_warn_ticker;
+};
+
+} // namespace mediakit
+
+#endif // ZLMEDIAKIT_MULTI_SOURCE_WEBRTC_PUSHER_H

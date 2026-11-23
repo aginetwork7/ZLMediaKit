@@ -1,0 +1,37 @@
+service:
+  flush: 5
+  log_level: info
+
+pipeline:
+  inputs:
+    - name: cpu
+      tag: host.cpu
+      interval_sec: ${METRICS_INTERVAL_SEC}
+    - name: node_exporter_metrics
+      metrics: meminfo
+      tag: host.meminfo
+      scrape_interval: ${METRICS_INTERVAL_SEC}
+      processors:
+        metrics:
+          - name: metrics_selector
+            metric_name: /^node_memory_(MemTotal|MemAvailable|MemFree)_bytes$/
+            action: include
+          - name: labels
+            upsert: media_server_id ${MEDIA_SERVER_ID}
+  filters:
+    - name: modify
+      match: host.*
+      add: media_server_id ${MEDIA_SERVER_ID}
+  outputs:
+    - name: opentelemetry
+      match: host.*
+      host: ${MEDIA_CONTROL_HOST}
+      port: ${MEDIA_CONTROL_PORT}
+      # 当前 media-control 与本机同处（host.docker.internal），流量不出宿主机；若控制面部署在其它主机，需开启 tls。
+      # Media-control currently runs on the same host, so traffic stays local; enable tls if it moves to another host.
+      # tls: true
+      metrics_uri: /agi7/api/media-control/hook/on_system_metrics
+      logs_uri: /agi7/api/media-control/hook/on_system_metrics
+      # 使用 media-control 的 SYSTEM_METRICS_TOKEN 认证，不使用 ZLM 的 api.secret，fluent-bit 不持有 ZLM 管理权限。
+      # Authenticates with media-control's SYSTEM_METRICS_TOKEN, not the ZLM api.secret, so fluent-bit holds no ZLM admin rights.
+      header: Authorization Bearer ${SYSTEM_METRICS_TOKEN}

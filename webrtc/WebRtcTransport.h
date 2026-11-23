@@ -14,12 +14,16 @@
 #include <memory>
 #include <string>
 #include <functional>
+#include <vector>
+#include <atomic>
+#include <mutex>
 #include "DtlsTransport.hpp"
 #include "IceTransport.hpp"
 #include "SrtpSession.hpp"
 #include "StunPacket.hpp"
 #include "Sdp.h"
 #include "Util/mini.h"
+#include "Util/util.h"
 #include "Poller/EventPoller.h"
 #include "Network/Socket.h"
 #include "Network/Session.h"
@@ -57,6 +61,28 @@ extern const std::string kExternIP;
 extern const std::string kInterfaces;
 }//namespace RTC
 
+// WebRTC session classification shared by the signaling entrypoints, the transport and the
+// connection-list API. Compare against these constants instead of string literals.
+namespace WebRtcSessionNames {
+// WebRtcArgs key that carries the entrypoint (one of the kSource* values).
+static constexpr char kSourceKey[] = "session_source";
+// Signaling entrypoint that created the transport.
+static constexpr char kSourceWhip[] = "whip";
+static constexpr char kSourceWhep[] = "whep";
+static constexpr char kSourceWhipBatch[] = "whip_batch";
+static constexpr char kSourceWebRtcApi[] = "webrtc_api";
+static constexpr char kSourceWebsocket[] = "websocket";
+// Session type stored on the transport (see getWebRtcSessionType in WebRtcTransport.cpp).
+// Unknown entrypoints fall back to <source>_<type>, or <type> when the source is empty.
+static constexpr char kTypeWhepPlayer[] = "whep_player";
+static constexpr char kTypeWhipPublisher[] = "whip_publisher";
+static constexpr char kTypeWhipBatchPublisher[] = "whip_batch_publisher";
+static constexpr char kTypeWebRtcApiPlayer[] = "webrtc_api_player";
+static constexpr char kTypeWebRtcApiPublisher[] = "webrtc_api_publisher";
+static constexpr char kTypeWebsocketPlayer[] = "websocket_player";
+static constexpr char kTypeWebsocketPublisher[] = "websocket_publisher";
+} // namespace WebRtcSessionNames
+
 class WebRtcInterface {
 public:
     virtual ~WebRtcInterface() = default;
@@ -68,6 +94,7 @@ public:
     virtual void setIceCandidate(std::vector<SdpAttrCandidate> cands) {}
     virtual void setLocalIp(std::string localIp) {}
     virtual void setPreferredTcp(bool flag) {}
+    virtual void setSessionType(std::string sessionType) {}
 
     using onGatheringCandidateCB = std::function<void(const std::string& transport_identifier, const std::string& candidate, const std::string& ufrag, const std::string& pwd)>;
     virtual void gatheringCandidate(IceServerInfo::Ptr ice_server, onGatheringCandidateCB cb = nullptr) = 0;
@@ -108,6 +135,11 @@ class WebRtcTransport : public WebRtcInterface, public RTC::DtlsTransport::Liste
 #endif
 {
 public:
+    struct NetworkInfo {
+        std::string local_candidate;
+        std::string remote_candidate;
+    };
+
     enum class Role {
         NONE = 0,
         CLIENT,
@@ -150,6 +182,9 @@ public:
 
     const toolkit::EventPoller::Ptr &getPoller() const { return _poller; }
     void setPoller(toolkit::EventPoller::Ptr poller) { _poller = std::move(poller); }
+    // A shut down transport may outlive onShutdown while ICE sessions on other candidate pairs still
+    // hold it; it then neither answers its peer nor counts as a viewer.
+    bool isShutdown() const { return _shutdown; }
 
     toolkit::Session::Ptr getSession() const;
     void removePair(const toolkit::SocketHelper *socket);
@@ -159,14 +194,34 @@ public:
 
     SignalingProtocols getSignalingProtocols() const { return _signaling_protocols; }
     void setSignalingProtocols(SignalingProtocols signaling_protocols) { _signaling_protocols = signaling_protocols; }
+    // The session type is set by the signaling callback after the transport is registered, while
+    // the connection list API may read it from another thread. Values: the WebRtcSessionNames::kType*
+    // constants, otherwise <source>_<type> or <type>.
+    std::string getSessionType() const {
+        std::lock_guard<std::mutex> lck(_session_type_mtx);
+        return _session_type;
+    }
+    void setSessionType(std::string session_type) override {
+        std::lock_guard<std::mutex> lck(_session_type_mtx);
+        _session_type = std::move(session_type);
+    }
+    // WHIP single-stream or batch publisher.
+    bool isWhipPublisher() const {
+        auto type = getSessionType();
+        return type == WebRtcSessionNames::kTypeWhipPublisher || type == WebRtcSessionNames::kTypeWhipBatchPublisher;
+    }
+    bool isWhepPlayer() const { return getSessionType() == WebRtcSessionNames::kTypeWhepPlayer; }
 
-    float getTimeOutSec();
+    float getTimeOutSec() const;
 
     void getTransportInfo(const std::function<void(Json::Value)> &callback) const;
     size_t getRecvSpeed() const { return _ice_agent ? _ice_agent->getRecvSpeed() : 0; }
-    size_t getRecvTotalBytes() const { return _ice_agent ? _ice_agent->getRecvTotalBytes() : 0; }
+    size_t getRecvTotalBytes() const { return _recv_total_bytes.load(std::memory_order_relaxed); }
     size_t getSendSpeed() const { return _ice_agent ? _ice_agent->getSendSpeed() : 0; }
-    size_t getSendTotalBytes() const { return _ice_agent ? _ice_agent->getSendTotalBytes() : 0; }
+    size_t getSendTotalBytes() const { return _send_total_bytes.load(std::memory_order_relaxed); }
+    uint64_t getCreateTime() const { return _create_time_ms; }
+    NetworkInfo getNetworkInfo() const;
+    std::string getHealth() const;
 
     void setOnShutdown(std::function<void(const toolkit::SockException &ex)> cb);
 
@@ -177,6 +232,17 @@ public:
     void setOnStartWebRTC(std::function<void()> on_start);
 
 protected:
+    void addRecvBytes(size_t bytes) {
+        _recv_total_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        markActivity();
+    }
+    void addSendBytes(size_t bytes) {
+        _send_total_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        markActivity();
+    }
+
+    virtual bool enableDatachannelEcho() const { return true; }
+
     // DtlsTransport::Listener; dtls相关的回调
     void OnDtlsTransportConnecting(const RTC::DtlsTransport *dtlsTransport) override;
     void OnDtlsTransportConnected(const RTC::DtlsTransport *dtlsTransport,
@@ -225,14 +291,18 @@ protected:
 protected:
     void sendRtcpRemb(uint32_t ssrc, size_t bit_rate);
     void sendRtcpPli(uint32_t ssrc);
+    void markActivity();
 
 private:
     void sendSockData(const char *buf, size_t len, const IceTransport::Pair::Ptr& pair = nullptr);
     void setRemoteDtlsFingerprint(SdpType type, const RtcSession &remote);
+    void updateNetworkInfo(const IceTransport::Pair::Ptr &pair, bool force = false);
 
 protected:
     SignalingProtocols  _signaling_protocols = SignalingProtocols::WHEP_WHIP;
     Role _role = Role::PEER;
+    std::string _session_type;
+    mutable std::mutex _session_type_mtx;
     RtcSession::Ptr _offer_sdp;
     RtcSession::Ptr _answer_sdp;
 
@@ -240,9 +310,11 @@ protected:
     onGatheringCandidateCB _on_gathering_candidate = nullptr;
 
 private:
+    std::atomic<bool> _shutdown { false };
     mutable std::string _delete_rand_str;
     std::string _identifier;
     toolkit::EventPoller::Ptr _poller;
+    uint64_t _create_time_ms = 0;
     DtlsTransport::Ptr  _dtls_transport;
     SrtpSession::Ptr _srtp_session_send;
     SrtpSession::Ptr _srtp_session_recv;
@@ -253,6 +325,12 @@ private:
 
     //超时功能实现
     toolkit::Ticker _recv_ticker;
+    std::atomic<size_t> _recv_total_bytes { 0 };
+    std::atomic<size_t> _send_total_bytes { 0 };
+    std::atomic<uint64_t> _last_activity_ms { 0 };
+    std::atomic<bool> _network_info_ready { false };
+    mutable std::mutex _network_info_mtx;
+    NetworkInfo _network_info;
     std::shared_ptr<toolkit::Timer> _check_timer;
     std::function<void()> _on_start;
     std::function<void(const toolkit::SockException &ex)> _on_shutdown;
@@ -397,6 +475,8 @@ private:
     // 根据接收rtp的pt获取相关信息  [AUTO-TRANSLATED:39e56d7d]
     // Get relevant information based on the pt of the received rtp
     std::unordered_map<uint8_t/*pt*/, std::unique_ptr<WrappedMediaTrack>> _pt_to_track;
+    // 根据接收rtp的ssrc获取更精确的track映射，适配多m-line同pt场景
+    std::unordered_map<uint32_t/*ssrc*/, std::unique_ptr<WrappedMediaTrack>> _ssrc_to_wrapped_track;
     std::vector<SdpAttrCandidate> _cands;
     // http访问时的host ip  [AUTO-TRANSLATED:e8fe6957]
     // Host ip for http access
@@ -408,6 +488,7 @@ public:
     friend class WebRtcTransportImp;
     static WebRtcTransportManager &Instance();
     WebRtcTransportImp::Ptr getItem(const std::string &key);
+    std::vector<WebRtcTransportImp::Ptr> getItems();
 
 private:
     WebRtcTransportManager() = default;
@@ -447,6 +528,10 @@ private:
 };
 
 void translateIPFromEnv(std::vector<std::string> &v);
+
+// Counts WebRTC players of the stream, including ones still negotiating; the WHEP viewer limit
+// counts the same way.
+size_t countWebRtcPlayers(const std::string &vhost, const std::string &app, const std::string &stream);
 
 }// namespace mediakit
 

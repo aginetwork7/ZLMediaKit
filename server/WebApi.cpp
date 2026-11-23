@@ -9,6 +9,7 @@
  */
 
 #include <exception>
+#include <algorithm>
 #include <sys/stat.h>
 #include <math.h>
 #include <signal.h>
@@ -38,6 +39,7 @@
 
 #include "WebApi.h"
 #include "WebHook.h"
+#include "LogRedact.h"
 #include "FFmpegSource.h"
 
 #include "Common/config.h"
@@ -55,8 +57,11 @@
 #endif
 
 #ifdef ENABLE_WEBRTC
+#include "../webrtc/MultiSourceWebRtcPusher/BatchPublishSessionManager.h"
+#include "../webrtc/MultiSourceWebRtcPusher/MultiSourceWebRtcPusher.h"
 #include "../webrtc/WebRtcPlayer.h"
 #include "../webrtc/WebRtcPusher.h"
+#include "../webrtc/WebRtcTalk.h"
 #include "../webrtc/WebRtcEchoTest.h"
 #include "../webrtc/WebRtcSignalingPeer.h"
 #include "../webrtc/WebRtcSignalingSession.h"
@@ -282,19 +287,19 @@ static inline void addHttpListener(){
                 }
 
                 LogContextCapture log(getLogger(), toolkit::LDebug, __FILE__, "http api debug", __LINE__);
-                log << "\r\n# request:\r\n" << parser.method() << " " << parser.fullUrl() << "\r\n";
+                // Credentials (API secret, media token, user/device JWT) are masked before logging.
+                log << "\r\n# request:\r\n" << parser.method() << " " << redactQuery(parser.fullUrl()) << "\r\n";
                 log << "# header:\r\n";
 
                 for (auto &pr : parser.getHeader()) {
-                    log << pr.first << " : " << pr.second << "\r\n";
+                    log << pr.first << " : " << redactHeaderForLog(pr.first, pr.second) << "\r\n";
                 }
 
-                auto &content = parser.content();
-                log << "# content:\r\n" << (content.size() > 4 * 1024 ? content.substr(0, 4 * 1024) : content) << "\r\n";
+                log << "# content:\r\n" << redactBodyForLog(parser["Content-Type"], parser.content()) << "\r\n";
 
                 if (size > 0 && size < 4 * 1024) {
                     auto response = body->readData(size);
-                    log << "# response:\r\n" << response->data() << "\r\n";
+                    log << "# response:\r\n" << redactResponseForLog(std::string(response->data(), response->size())) << "\r\n";
                     invoker(code, headerOut, response);
                 } else {
                     log << "# response size:" << size << "\r\n";
@@ -774,6 +779,22 @@ template void check_secret<ApiArgsType>(toolkit::SockInfo &, mediakit::HttpSessi
 template void check_secret<Json::Value>(toolkit::SockInfo &, mediakit::HttpSession::KeyValue &, const HttpAllArgs<Json::Value> &, Json::Value &);
 template void check_secret<std::string>(toolkit::SockInfo &, mediakit::HttpSession::KeyValue &, const HttpAllArgs<std::string> &, Json::Value &);
 
+#ifdef ENABLE_WEBRTC
+static string getWebRtcSignalingLabel(const WebRtcTransportImp &transport) {
+    if (transport.isWhipPublisher()) {
+        return WebRtcSessionNames::kSourceWhip;
+    }
+    if (transport.isWhepPlayer()) {
+        return WebRtcSessionNames::kSourceWhep;
+    }
+    return WebRtcTransport::SignalingProtocolsStr(transport.getSignalingProtocols());
+}
+
+static string getWebRtcMediaKey(const string &app, const string &stream) {
+    return app + "\n" + stream;
+}
+#endif
+
 /**
  * 安装api接口
  * 所有api都支持GET和POST两种方式
@@ -857,7 +878,7 @@ void installWebApi() {
         }
         if (changed > 0) {
             NOTICE_EMIT(BroadcastReloadConfigArgs, Broadcast::kBroadcastReloadConfig);
-            ini.dumpFile(g_ini_file);
+            saveIniFile();
         }
         val["changed"] = changed;
     });
@@ -1804,7 +1825,12 @@ void installWebApi() {
             std::string err;
             std::string path;
             try {
-                path = src->getMuxer()->startRecord(allArgs["path"], allArgs["back_ms"], allArgs["forward_ms"]);
+                // Some sources (such as the ones of a batch publisher) have no muxer and cannot record.
+                auto muxer = src->getMuxer();
+                if (!muxer) {
+                    throw std::runtime_error("this stream does not support recording");
+                }
+                path = muxer->startRecord(allArgs["path"], allArgs["back_ms"], allArgs["forward_ms"]);
             } catch (std::exception &ex) {
                 err = ex.what();
             }
@@ -2180,7 +2206,7 @@ void installWebApi() {
         CHECK(!offer.empty(), "http body(webrtc offer sdp) is empty");
 
         auto &session = static_cast<Session&>(sender);
-        auto args = std::make_shared<WebRtcArgsImp<std::string>>(allArgs, sender.getIdentifier());
+        auto args = std::make_shared<WebRtcArgsImp<std::string>>(allArgs, sender.getIdentifier(), WebRtcSessionNames::kSourceWebRtcApi);
         WebRtcPluginManager::Instance().negotiateSdp(session, type, *args, [invoker, val, offer, headerOut](const WebRtcInterface &exchanger) mutable {
             auto &handler = const_cast<WebRtcInterface &>(exchanger);
             try {
@@ -2197,30 +2223,169 @@ void installWebApi() {
     });
 
     static constexpr char delete_webrtc_url [] = "/index/api/delete_webrtc";
-    static auto whip_whep_func = [](const char *type, API_ARGS_STRING_ASYNC) {
+    static auto whip_whep_func = [](const char *type, const char *session_source, API_ARGS_STRING_ASYNC) {
         auto offer = allArgs.args;
         CHECK(!offer.empty(), "http body(webrtc offer sdp) is empty");
 
         auto &session = static_cast<Session&>(sender);
         auto location = std::string(session.overSsl() ? "https://" : "http://") + allArgs["host"] + delete_webrtc_url;
-        auto args = std::make_shared<WebRtcArgsImp<std::string>>(allArgs, sender.getIdentifier());
-        WebRtcPluginManager::Instance().negotiateSdp(session, type, *args, [invoker, offer, headerOut, location](const WebRtcInterface &exchanger) mutable {
+        auto args = std::make_shared<WebRtcArgsImp<std::string>>(allArgs, sender.getIdentifier(), session_source);
+        auto log_target = std::string(type) + " " + allArgs["app"] + "/" + allArgs["stream"] + " from " + sender.get_peer_ip();
+        WebRtcPluginManager::Instance().negotiateSdp(session, type, *args, [invoker, offer, headerOut, location, log_target](const WebRtcInterface &exchanger) mutable {
             auto &handler = const_cast<WebRtcInterface &>(exchanger);
             try {
                 // 设置返回类型  [AUTO-TRANSLATED:ffc2a31a]
                 // Set return type
                 headerOut["Content-Type"] = "application/sdp";
-                headerOut["Location"] = location + "?id=" + exchanger.getIdentifier() + "&token=" + exchanger.deleteRandStr();
+                // The id is base64 and may hold '+', which the query parser decodes to a space: encode it so
+                // DELETE on this Location finds the session.
+                headerOut["Location"] = location + "?id=" + strCoding::UrlEncodeComponent(exchanger.getIdentifier())
+                    + "&token=" + strCoding::UrlEncodeComponent(exchanger.deleteRandStr());
                 invoker(201, headerOut, handler.getAnswerSdp(offer));
             } catch (std::exception &ex) {
+                // Covers every rejection: hook denial, viewer limit, invalid offer, stream not found.
+                WarnL << "webrtc negotiate failed, " << log_target << ": " << ex.what();
                 headerOut["Content-Type"] = "text/plain";
                 invoker(406, headerOut, ex.what());
             }
         });
     };
 
-    api_regist("/index/api/whip", [](API_ARGS_STRING_ASYNC) { whip_whep_func("push", API_ARGS_VALUE, invoker); });
-    api_regist("/index/api/whep", [](API_ARGS_STRING_ASYNC) { whip_whep_func("play", API_ARGS_VALUE, invoker); });
+    api_regist("/index/api/whip", [](API_ARGS_STRING_ASYNC) { whip_whep_func("push", WebRtcSessionNames::kSourceWhip, API_ARGS_VALUE, invoker); });
+    api_regist("/index/api/whep", [](API_ARGS_STRING_ASYNC) { whip_whep_func("play", WebRtcSessionNames::kSourceWhep, API_ARGS_VALUE, invoker); });
+    api_regist("/index/api/whipBatch", [](API_ARGS_STRING_ASYNC) { whip_whep_func("push_batch", WebRtcSessionNames::kSourceWhipBatch, API_ARGS_VALUE, invoker); });
+
+    static auto get_whip_batch_info = [](API_ARGS_MAP) {
+        CHECK_SECRET();
+        CHECK_ARGS("app", "stream");
+
+        val["data"] = BatchPublishSessionManager::Instance().getSessionInfo(allArgs["app"], allArgs["stream"]);
+    };
+    api_regist("/index/api/getWhipBatchInfo", [](API_ARGS_MAP) { get_whip_batch_info(API_ARGS_VALUE); });
+    // Deprecated name kept for existing callers (zlm-exporter); use getWhipBatchInfo.
+    api_regist("/index/api/whipBatchInfo", [](API_ARGS_MAP) { get_whip_batch_info(API_ARGS_VALUE); });
+
+    api_regist("/index/api/getWhepViewerCount", [](API_ARGS_MAP) {
+        CHECK_SECRET();
+        CHECK_ARGS("app", "stream");
+
+        Json::Value data;
+        data["app"] = allArgs["app"];
+        data["stream"] = allArgs["stream"];
+        // Same count as the WHEP viewer limit: WebRTC players of the stream, including ones still negotiating.
+        data["whepViewerCount"] = (Json::UInt64)countWebRtcPlayers(DEFAULT_VHOST, allArgs["app"], allArgs["stream"]);
+        val["data"] = std::move(data);
+    });
+
+    api_regist("/index/api/getWebRtcConnectionList", [](API_ARGS_MAP) {
+        CHECK_SECRET();
+        auto offset = std::max(0, atoi(allArgs["offset"].data()));
+        auto limit = atoi(allArgs["limit"].data());
+        limit = limit > 0 ? std::min(limit, 200) : 100;
+
+        auto transports = WebRtcTransportManager::Instance().getItems();
+        // A shut down transport only lingers until its ICE sessions time out; it is no longer a connection.
+        transports.erase(std::remove_if(transports.begin(), transports.end(), [](const WebRtcTransportImp::Ptr &transport) {
+            return transport->isShutdown();
+        }), transports.end());
+        std::sort(transports.begin(), transports.end(), [](const WebRtcTransportImp::Ptr &left, const WebRtcTransportImp::Ptr &right) {
+            auto left_is_whip = left->isWhipPublisher();
+            auto right_is_whip = right->isWhipPublisher();
+            if (left_is_whip != right_is_whip) {
+                return left_is_whip;
+            }
+            return left->getIdentifier() < right->getIdentifier();
+        });
+
+        unordered_map<string, string> whip_parent_by_media;
+        for (const auto &transport : transports) {
+            if (!transport->isWhipPublisher()) {
+                continue;
+            }
+            if (auto batch = std::dynamic_pointer_cast<MultiSourceWebRtcPusher>(transport)) {
+                auto media_info = batch->getMediaInfo();
+                auto session = BatchPublishSessionManager::Instance().getSession(media_info.app, media_info.stream);
+                if (!session) {
+                    continue;
+                }
+                for (const auto &source_id : session->getBoundSourceIds()) {
+                    whip_parent_by_media.emplace(getWebRtcMediaKey(media_info.app, source_id), transport->getIdentifier());
+                }
+            } else if (auto pusher = std::dynamic_pointer_cast<WebRtcPusher>(transport)) {
+                auto &media_info = pusher->getMediaInfo();
+                whip_parent_by_media.emplace(getWebRtcMediaKey(media_info.app, media_info.stream), transport->getIdentifier());
+            }
+        }
+
+        unordered_map<string, Json::UInt64> viewer_count_by_parent;
+        for (const auto &transport : transports) {
+            if (!transport->isWhepPlayer()) {
+                continue;
+            }
+            auto player = std::dynamic_pointer_cast<WebRtcPlayer>(transport);
+            if (!player) {
+                continue;
+            }
+            auto media_info = player->getMediaInfo();
+            auto parent = whip_parent_by_media.find(getWebRtcMediaKey(media_info.app, media_info.stream));
+            if (parent == whip_parent_by_media.end()) {
+                continue;
+            }
+            ++viewer_count_by_parent[parent->second];
+        }
+
+        val["total"] = (Json::UInt64)transports.size();
+        auto &data = val["data"];
+        data = Value(arrayValue);
+        for (size_t index = (size_t)offset; index < transports.size() && data.size() < (Json::ArrayIndex)limit; ++index) {
+            auto &transport = transports[index];
+            Value item;
+            item["id"] = transport->getIdentifier();
+            item["sessionType"] = transport->getSessionType();
+            item["signalingProtocol"] = getWebRtcSignalingLabel(*transport);
+            auto network_info = transport->getNetworkInfo();
+            item["health"] = transport->getHealth();
+            item["localCandidate"] = network_info.local_candidate;
+            item["remoteCandidate"] = network_info.remote_candidate;
+            item["createTime"] = (Json::UInt64)transport->getCreateTime();
+            item["durationSec"] = (Json::UInt64)transport->getDuration();
+            item["recvBytes"] = (Json::UInt64)transport->getRecvTotalBytes();
+            item["sendBytes"] = (Json::UInt64)transport->getSendTotalBytes();
+
+            if (auto batch = std::dynamic_pointer_cast<MultiSourceWebRtcPusher>(transport)) {
+                auto media_info = batch->getMediaInfo();
+                item["app"] = media_info.app;
+                item["stream"] = media_info.stream;
+                item["batch"] = BatchPublishSessionManager::Instance().getSessionSummary(media_info.app, media_info.stream);
+                // Always present for WHIP and batch parents: 0 means no WHEP viewer.
+                auto viewers = viewer_count_by_parent.find(transport->getIdentifier());
+                item["viewerCount"] = viewers != viewer_count_by_parent.end() ? viewers->second : (Json::UInt64)0;
+            } else if (auto player = std::dynamic_pointer_cast<WebRtcPlayer>(transport)) {
+                auto media_info = player->getMediaInfo();
+                item["app"] = media_info.app;
+                item["stream"] = media_info.stream;
+                if (transport->isWhepPlayer()) {
+                    auto it = whip_parent_by_media.find(getWebRtcMediaKey(media_info.app, media_info.stream));
+                    if (it != whip_parent_by_media.end()) {
+                        item["parentId"] = it->second;
+                    }
+                }
+            } else if (auto pusher = std::dynamic_pointer_cast<WebRtcPusher>(transport)) {
+                auto &media_info = pusher->getMediaInfo();
+                item["app"] = media_info.app;
+                item["stream"] = media_info.stream;
+                if (transport->isWhipPublisher()) {
+                    auto viewers = viewer_count_by_parent.find(transport->getIdentifier());
+                    item["viewerCount"] = viewers != viewer_count_by_parent.end() ? viewers->second : (Json::UInt64)0;
+                }
+            } else if (auto talk = std::dynamic_pointer_cast<WebRtcTalk>(transport)) {
+                auto &media_info = talk->getMediaInfo();
+                item["app"] = media_info.app;
+                item["stream"] = media_info.stream;
+            }
+            data.append(std::move(item));
+        }
+    });
 
     api_regist(delete_webrtc_url, [](API_ARGS_MAP_ASYNC) {
         CHECK_ARGS("id", "token");

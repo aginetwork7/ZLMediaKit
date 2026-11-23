@@ -1,10 +1,7 @@
 # syntax=docker/dockerfile:1.7
 FROM ubuntu:24.04 AS build
 ARG MODEL=Release
-#rtsp,http
-EXPOSE 554/tcp
-EXPOSE 8089/tcp
-EXPOSE 8449/tcp
+
 # ADD sources.list /etc/apt/sources.list
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -23,6 +20,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
          ca-certificates \
          tzdata \
          libssl-dev \
+         libusrsctp-dev \
          gcc \
          g++ \
          gdb && \
@@ -51,7 +49,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         cmake -G Ninja \
             -DENABLE_PYTHON=false \
             -DCMAKE_BUILD_TYPE=${MODEL} \
-            -DENABLE_WEBRTC=false \
+            -DENABLE_WEBRTC=true \
             -DENABLE_FFMPEG=true \
             -DENABLE_TESTS=false \
             -DENABLE_API=false \
@@ -94,10 +92,19 @@ COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/MediaServer /opt/
 # 调试符号随镜像发布，与二进制同目录，gdb 通过 debuglink 自动加载，Build ID 必然匹配
 # Ship debug symbols next to the binary; gdb loads them through the debuglink, Build ID always matches
 COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/MediaServer.debug /opt/media/bin/
-COPY --from=build /opt/media/ZLMediaKit/release/linux/${MODEL}/config.ini /opt/media/conf/
-COPY --from=build /opt/media/ZLMediaKit/www/ /opt/media/bin/www/
+COPY --from=build /usr/local/lib/libsrtp2.so.* /usr/local/lib/
+COPY --from=build /usr/lib/*/libusrsctp.so.* /usr/local/lib/
+COPY --from=build /opt/media/ZLMediaKit/conf/config.media.ini /opt/media/conf/config.media.ini
+COPY --from=build /opt/media/ZLMediaKit/conf/config.sfu.ini /opt/media/conf/config.sfu.ini
+# 仅保留 webassist，避免 swagger/webrtc 等目录随 http 服务对外暴露
+COPY --from=build /opt/media/ZLMediaKit/www/webassist/ /opt/media/bin/www/webassist/
+# 两份配置的 api.defaultSnap=./www/logo.png：截图还未生成时返回的默认图片
+# Both configs use api.defaultSnap=./www/logo.png, returned while a snapshot is not ready yet
+COPY --from=build /opt/media/ZLMediaKit/www/logo.png /opt/media/bin/www/logo.png
 COPY --from=build /opt/media/ZLMediaKit/tools/record_zlm_resources.sh /opt/media/bin/
-RUN chmod +x /opt/media/bin/record_zlm_resources.sh
+COPY docker-entrypoint.sh /opt/media/bin/docker-entrypoint.sh
+RUN ldconfig && \
+    chmod +x /opt/media/bin/record_zlm_resources.sh /opt/media/bin/docker-entrypoint.sh
 
 ENV PATH=/opt/media/bin:$PATH
-CMD ["./MediaServer","-s", "default.pem", "-c", "../conf/config.ini", "--log-dir", "/opt/media/bin/log", "-l","0"]
+ENTRYPOINT ["/opt/media/bin/docker-entrypoint.sh"]

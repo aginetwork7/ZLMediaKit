@@ -25,38 +25,16 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      # 宿主机端口取 ZLM_HTTP_PORT（默认 8080），与 zlm-exporter 访问的端口保持一致。
+      # 宿主机端口取 ZLM_HTTP_PORT（默认 8080）。zlm-exporter 由 apm-deploy 的 exporter-node（profile zlm）运行，
+      # 经 host.docker.internal 访问该端口；改了 ZLM_HTTP_PORT 要同步 exporter-node .env 的 ZLM_API_URL。
+      # zlm-exporter runs in apm-deploy's exporter-node (profile zlm) and reaches this port via host.docker.internal.
+      # 每台机器只运行一套 SFU：容器名和 RTC 端口 8000 固定，不支持同机部署第二套。
+      # One SFU per host: container names and RTC port 8000 are fixed, a second SFU stack on the same host is not supported.
       # 安全组须限制该端口仅 nginx 或内网可访问：config.sfu.ini 信任 X-Real-IP（forwarded_ip_header）。
       # The security group must only let nginx or the internal network reach this port: config.sfu.ini trusts X-Real-IP.
       - "${ZLM_HTTP_PORT:-8080}:8080/tcp"
       - "8000:8000/tcp"
       - "8000:8000/udp"
-
-  zlm-exporter:
-    image: ${REGISTRY}/zlm-exporter:${ZLM_EXPORTER_TAG:?ZLM_EXPORTER_TAG is required}
-    container_name: zlm-exporter
-    depends_on:
-      - zlmediakit
-    environment:
-      # 经宿主机映射端口访问本环境 ZLM，不依赖 agi7 网络上的服务名解析。
-      # 每台机器只运行一套 SFU：容器名和 RTC 端口 8000 固定，不支持同机部署第二套。
-      # One SFU per host: container names and RTC port 8000 are fixed, a second SFU stack on the same host is not supported.
-      # ZLM_HTTP_PORT 与上面 zlmediakit 的端口映射共用同一变量
-      ZLM_API_URL: http://host.docker.internal:${ZLM_HTTP_PORT:-8080}
-      ZLM_API_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}
-    restart: always
-    deploy:
-      resources:
-        limits:
-          cpus: '0.25'
-          memory: 128M
-    networks:
-      - agi7
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      # 仅允许中心 Prometheus 访问（安全组/防火墙限制来源 IP）
-      - "${ZLM_EXPORTER_PORT:-9101}:9101/tcp"
 
   fluent-bit-zlm:
     image: fluent/fluent-bit:5.1

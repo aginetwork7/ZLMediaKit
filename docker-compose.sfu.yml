@@ -38,7 +38,9 @@ services:
     depends_on:
       - zlmediakit
     environment:
-      # 经宿主机映射端口访问本环境 ZLM：同机多套环境共用 agi7 网络，服务名 zlmediakit 会解析到多个容器。
+      # 经宿主机映射端口访问本环境 ZLM，不依赖 agi7 网络上的服务名解析。
+      # 每台机器只运行一套 SFU：容器名和 RTC 端口 8000 固定，不支持同机部署第二套。
+      # One SFU per host: container names and RTC port 8000 are fixed, a second SFU stack on the same host is not supported.
       # ZLM_HTTP_PORT 与上面 zlmediakit 的端口映射共用同一变量
       ZLM_API_URL: http://host.docker.internal:${ZLM_HTTP_PORT:-8080}
       ZLM_API_SECRET: ${MEDIA_SERVER_SECRET:?MEDIA_SERVER_SECRET is required}

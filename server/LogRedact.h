@@ -7,8 +7,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <exception>
 #include <string>
 #include "json/json.h"
+#include "Common/strCoding.h"
 
 namespace mediakit {
 
@@ -19,15 +21,28 @@ inline std::string toLowerCopy(std::string str) {
     return str;
 }
 
-// Keys whose values are credentials: media tokens, the API secret and a JWT passed as a parameter.
-// A config key in section.key form is matched by its key, so setServerConfig's "api.secret" is one.
+inline bool endsWith(const std::string &str, const std::string &suffix) {
+    return str.size() >= suffix.size() && str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+// Keys whose values are credentials: media tokens, the API secret, a JWT passed as a parameter and
+// passwords (srt.passPhrase, rtc.icePwd, password, passwd, pwd). A config key in section.key form is
+// matched by its key, so setServerConfig's "api.secret" is one.
 inline bool isSecretQueryKey(const std::string &key) {
     auto lower = toLowerCopy(key);
     auto dot = lower.rfind('.');
     if (dot != std::string::npos) {
         lower = lower.substr(dot + 1);
     }
-    return lower == "token" || lower == "secret" || lower == "authorization";
+    if (lower == "token" || lower == "secret" || lower == "authorization") {
+        return true;
+    }
+    for (auto suffix : { "passphrase", "password", "passwd", "pwd" }) {
+        if (endsWith(lower, suffix)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Headers whose values are credentials.
@@ -36,10 +51,67 @@ inline bool isSecretHeader(const std::string &key) {
     return lower == "authorization" || lower == "proxy-authorization" || lower == "cookie";
 }
 
-// Masks secret values in a URL ("/path?a=1&token=x") or a bare query string ("a=1&token=x").
-inline std::string redactQuery(const std::string &str) {
+// Masks the password of every scheme://user:password@host in str, such as the camera credentials of
+// an addStreamProxy url: "rtsp://admin:***@10.0.0.5/ch1".
+inline std::string redactUrlUserInfo(const std::string &str) {
+    std::string out;
+    size_t pos = 0;
+    for (;;) {
+        auto scheme_end = str.find("://", pos);
+        if (scheme_end == std::string::npos) {
+            break;
+        }
+        auto host_begin = scheme_end + 3;
+        auto host_end = str.find_first_of("/?#&\"' \t\r\n", host_begin);
+        if (host_end == std::string::npos) {
+            host_end = str.size();
+        }
+        auto at = host_end > host_begin ? str.rfind('@', host_end - 1) : std::string::npos;
+        auto colon = str.find(':', host_begin);
+        if (at != std::string::npos && at >= host_begin && colon < at) {
+            out.append(str, pos, colon + 1 - pos);
+            out += kRedacted;
+            pos = at;
+        } else {
+            out.append(str, pos, host_end - pos);
+            pos = host_end;
+        }
+    }
+    out.append(str, pos, std::string::npos);
+    return out;
+}
+
+// How deep redactQuery follows URLs nested in query values.
+static constexpr int kMaxRedactDepth = 3;
+
+inline std::string redactQueryAt(const std::string &str, int depth);
+
+// A query value: the password of a URL in it is masked, and so are the credentials of a query nested
+// in it, whether raw (url=rtsp://h/x?token=t) or percent-encoded (url=rtsp%3A%2F%2Fh%2Fx%3Ftoken%3Dt).
+// An encoded value that needed masking is logged decoded.
+inline std::string redactQueryValue(const std::string &value, int depth) {
+    auto out = redactUrlUserInfo(value);
+    if (depth >= kMaxRedactDepth) {
+        return out;
+    }
+    if (out.find('?') != std::string::npos) {
+        return redactQueryAt(out, depth + 1);
+    }
+    if (value.find('%') != std::string::npos) {
+        auto decoded = strCoding::UrlDecodeComponent(value);
+        if (decoded != value) {
+            auto masked = redactQueryValue(decoded, depth + 1);
+            if (masked != decoded) {
+                return masked;
+            }
+        }
+    }
+    return out;
+}
+
+inline std::string redactQueryAt(const std::string &str, int depth) {
     auto query_pos = str.find('?');
-    std::string out = query_pos == std::string::npos ? "" : str.substr(0, query_pos + 1);
+    std::string out = query_pos == std::string::npos ? "" : redactUrlUserInfo(str.substr(0, query_pos + 1));
     size_t pos = query_pos == std::string::npos ? 0 : query_pos + 1;
     while (pos <= str.size()) {
         auto end = str.find('&', pos);
@@ -48,10 +120,12 @@ inline std::string redactQuery(const std::string &str) {
         }
         auto pair = str.substr(pos, end - pos);
         auto eq = pair.find('=');
-        if (eq != std::string::npos && isSecretQueryKey(pair.substr(0, eq))) {
+        if (eq == std::string::npos) {
+            out += redactUrlUserInfo(pair);
+        } else if (isSecretQueryKey(pair.substr(0, eq))) {
             out += pair.substr(0, eq + 1) + kRedacted;
         } else {
-            out += pair;
+            out += pair.substr(0, eq + 1) + redactQueryValue(pair.substr(eq + 1), depth);
         }
         if (end == str.size()) {
             break;
@@ -62,18 +136,39 @@ inline std::string redactQuery(const std::string &str) {
     return out;
 }
 
-// Masks credentials at any depth: members with a secret/token/authorization key (also as section.key,
-// such as the "api.secret" of getServerConfig) or a secret header name such as cookie, and the query
-// credentials inside string values, such as an originUrl or params carrying "?token=...". redactQuery
-// leaves a string without such a parameter unchanged.
+// Masks secret values in a URL ("/path?a=1&token=x") or a bare query string ("a=1&token=x"), URL
+// passwords, and the credentials of URLs nested in query values.
+inline std::string redactQuery(const std::string &str) {
+    return redactQueryAt(str, 0);
+}
+
+// Masks the credentials in one logged string value: a query string or URL goes through redactQuery,
+// any other string only has its URL passwords masked.
+inline std::string redactStringForLog(const std::string &str) {
+    return str.find('=') != std::string::npos ? redactQuery(str) : redactUrlUserInfo(str);
+}
+
+// Parses str as JSON; false when it is not valid JSON or nests deeper than jsoncpp allows, in which
+// case the reader throws instead of returning false.
+inline bool parseJsonForLog(const std::string &str, Json::Value &root) {
+    try {
+        Json::Reader reader;
+        return reader.parse(str, root);
+    } catch (std::exception &) {
+        return false;
+    }
+}
+
+// Masks credentials at any depth: members with a credential key (also as section.key, such as the
+// "api.secret" or "srt.passPhrase" of getServerConfig) or a secret header name such as cookie, and the
+// credentials inside string values: URL passwords and query credentials, such as an originUrl carrying
+// "?token=..." or "rtsp://user:password@...". Strings without credentials are kept unchanged.
 inline void redactJsonForLog(Json::Value &value) {
     if (value.isString()) {
         auto str = value.asString();
-        if (str.find('=') != std::string::npos) {
-            auto masked = redactQuery(str);
-            if (masked != str) {
-                value = masked;
-            }
+        auto masked = redactStringForLog(str);
+        if (masked != str) {
+            value = masked;
         }
         return;
     }
@@ -99,8 +194,7 @@ inline void redactJsonForLog(Json::Value &value) {
 // is kept as is.
 inline std::string redactResponseForLog(const std::string &response) {
     Json::Value root;
-    Json::Reader reader;
-    if (response.empty() || (response[0] != '{' && response[0] != '[') || !reader.parse(response, root)) {
+    if (response.empty() || (response[0] != '{' && response[0] != '[') || !parseJsonForLog(response, root)) {
         return response;
     }
     redactJsonForLog(root);
@@ -119,8 +213,7 @@ inline std::string redactBodyForLog(const std::string &content_type_in, const st
     }
     if (content_type.find("json") != std::string::npos) {
         Json::Value root;
-        Json::Reader reader;
-        if (!reader.parse(raw, root) || !root.isObject()) {
+        if (!parseJsonForLog(raw, root) || !root.isObject()) {
             return "<json, " + std::to_string(raw.size()) + " bytes>";
         }
         redactJsonForLog(root);
@@ -130,14 +223,8 @@ inline std::string redactBodyForLog(const std::string &content_type_in, const st
     return raw.size() > kMaxLogBody ? raw.substr(0, kMaxLogBody) : raw;
 }
 
-// Hook body fields masked whole in a form hook body: the player/device JWT ("authorization") and the
-// API secret that on_server_started/on_server_keepalive carry with the server config ("api.secret").
-// "params" (the play/publish url query) keeps its other values, only its media token is masked.
-static constexpr const char *kHookSecretFields[] = { "authorization", "api.secret" };
-static constexpr char kHookParamsField[] = "params";
-
-// A JSON hook body is masked like an API body: secret members at any depth (authorization, api.secret)
-// and query credentials in any string value (params, originUrl, ...).
+// A JSON hook body is masked like an API body: credential members at any depth (authorization,
+// api.secret, ...) and the credentials in any string value (params, originUrl, ...).
 inline void redactHookBody(Json::Value &value) {
     redactJsonForLog(value);
 }
@@ -145,16 +232,16 @@ inline void redactHookBody(Json::Value &value) {
 // The same for a form hook body (HttpArgs or any map of string-convertible values).
 template <typename Args>
 inline void redactHookArgs(Args &args) {
-    for (auto field : kHookSecretFields) {
-        auto it = args.find(field);
-        if (it != args.end()) {
-            it->second = kRedacted;
+    for (auto &pr : args) {
+        if (isSecretQueryKey(pr.first) || isSecretHeader(pr.first)) {
+            pr.second = kRedacted;
+            continue;
         }
-    }
-    auto it = args.find(kHookParamsField);
-    if (it != args.end()) {
-        std::string params = it->second;
-        it->second = redactQuery(params);
+        std::string value = pr.second;
+        auto masked = redactStringForLog(value);
+        if (masked != value) {
+            pr.second = masked;
+        }
     }
 }
 

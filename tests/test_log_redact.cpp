@@ -88,6 +88,61 @@ static void testBody() {
     expectTrue("other body cut", redactBodyForLog("text/plain", string(2 * kMaxLogBody, 'x')).size() == kMaxLogBody);
 }
 
+// URL passwords, nested query credentials and password-like keys.
+static void testUrlCredentials() {
+    expectEq("userinfo", redactUrlUserInfo("rtsp://admin:pw@10.0.0.5:554/ch1"), "rtsp://admin:***@10.0.0.5:554/ch1");
+    expectEq("userinfo two urls", redactUrlUserInfo("a rtsp://u:p@h/x b rtmp://v:q@g/y"), "a rtsp://u:***@h/x b rtmp://v:***@g/y");
+    expectEq("userinfo @ in password", redactUrlUserInfo("rtsp://u:p@ss@h/x"), "rtsp://u:***@h/x");
+    expectEq("no userinfo", redactUrlUserInfo("rtsp://h:554/live/a@b"), "rtsp://h:554/live/a@b");
+    expectEq("user only", redactUrlUserInfo("rtsp://u@h/x"), "rtsp://u@h/x");
+    expectEq("not a url", redactUrlUserInfo("a:b@c"), "a:b@c");
+
+    expectEq("query url userinfo", redactQuery("/index/api/addStreamProxy?url=rtsp://u:p@h/x&app=a"),
+             "/index/api/addStreamProxy?url=rtsp://u:***@h/x&app=a");
+    expectEq("query nested raw token", redactQuery("/index/api/addStreamProxy?url=rtsp://h/live?token=t&app=a"),
+             "/index/api/addStreamProxy?url=rtsp://h/live?token=***&app=a");
+    expectEq("query nested raw token first", redactQuery("/index/api/addStreamProxy?app=a&url=rtsp://h/live?token=t&stream=s"),
+             "/index/api/addStreamProxy?app=a&url=rtsp://h/live?token=***&stream=s");
+    expectEq("query nested encoded token", redactQuery("/a?url=rtsp%3A%2F%2Fh%2Fs%3Ftoken%3Dt&app=a"),
+             "/a?url=rtsp://h/s?token=***&app=a");
+    expectEq("query nested encoded userinfo", redactQuery("/a?dst_url=rtmp%3A%2F%2Fu%3Ap%40h%2Fs"), "/a?dst_url=rtmp://u:***@h/s");
+    expectEq("query encoded no secret", redactQuery("/a?url=rtsp%3A%2F%2Fh%2Fs&app=a"), "/a?url=rtsp%3A%2F%2Fh%2Fs&app=a");
+    expectEq("form url userinfo", redactBodyForLog("application/x-www-form-urlencoded", "url=rtsp%3A%2F%2Fu%3Ap%40h%2Fx&app=a"),
+             "url=rtsp://u:***@h/x&app=a");
+
+    expectTrue("key passPhrase", isSecretQueryKey("srt.passPhrase"));
+    expectTrue("key icePwd", isSecretQueryKey("rtc.icePwd"));
+    expectTrue("key password", isSecretQueryKey("password"));
+    expectTrue("key passwd", isSecretQueryKey("passwd"));
+    expectTrue("key pwd", isSecretQueryKey("PWD"));
+    expectTrue("key port", !isSecretQueryKey("rtc.port"));
+    expectEq("setServerConfig passwords", redactQuery("/index/api/setServerConfig?srt.passPhrase=k&rtc.icePwd=p&password=x&rtc.port=8000"),
+             "/index/api/setServerConfig?srt.passPhrase=***&rtc.icePwd=***&password=***&rtc.port=8000");
+
+    auto json = parse(R"({"data":[{"originUrl":"rtsp://admin:pw@h/ch1","srt.passPhrase":"k","rtc.icePwd":"p","name":"cam"}]})");
+    redactJsonForLog(json);
+    expectEq("json userinfo", json["data"][0]["originUrl"].asString(), "rtsp://admin:***@h/ch1");
+    expectEq("json passPhrase", json["data"][0]["srt.passPhrase"].asString(), kRedacted);
+    expectEq("json icePwd", json["data"][0]["rtc.icePwd"].asString(), kRedacted);
+    expectEq("json other", json["data"][0]["name"].asString(), "cam");
+
+    auto body = redactBodyForLog("application/json", R"({"url":"rtsp://u:p@h/x","password":"x"})");
+    expectTrue("json body userinfo", body.find(":p@") == string::npos && body.find("rtsp://u:***@h/x") != string::npos);
+    expectTrue("json body password", body.find("\"x\"") == string::npos);
+}
+
+// JSON nested deeper than jsoncpp allows makes its reader throw; the log helpers fall back instead.
+static void testDeepJson() {
+    string deep_object;
+    for (int i = 0; i < 2000; ++i) {
+        deep_object += "{\"a\":";
+    }
+    deep_object += "1" + string(2000, '}');
+    expectEq("deep json body", redactBodyForLog("application/json", deep_object), "<json, " + to_string(deep_object.size()) + " bytes>");
+    auto deep_array = string(2000, '[') + string(2000, ']');
+    expectEq("deep json response", redactResponseForLog(deep_array), deep_array);
+}
+
 // Hook bodies: authorization and api.secret masked whole, params keeps everything but its token.
 static void testHook() {
     auto body = parse(R"({"authorization":"Bearer jwt","api.secret":"s","params":"a=1&token=t","app":"live"})");
@@ -108,11 +163,14 @@ static void testHook() {
     redactHookBody(plain);
     expectTrue("hook no params", !plain.isMember("params") && plain.size() == 1);
 
-    map<string, string> args { { "authorization", "Bearer jwt" }, { "params", "token=t&b=2" }, { "app", "live" } };
+    map<string, string> args { { "authorization", "Bearer jwt" }, { "params", "token=t&b=2" }, { "app", "live" },
+                               { "originUrl", "rtsp://u:p@h/x" }, { "srt.passPhrase", "k" } };
     redactHookArgs(args);
     expectEq("hook args authorization", args["authorization"], kRedacted);
     expectEq("hook args params", args["params"], "token=***&b=2");
     expectEq("hook args other", args["app"], "live");
+    expectEq("hook args userinfo", args["originUrl"], "rtsp://u:***@h/x");
+    expectEq("hook args passPhrase", args["srt.passPhrase"], kRedacted);
     expectTrue("hook args no secret added", args.find("api.secret") == args.end());
 }
 
@@ -158,6 +216,8 @@ int main() {
     testJson();
     testBody();
     testHook();
+    testUrlCredentials();
+    testDeepJson();
 
     if (s_failed) {
         cerr << s_failed << " check(s) failed" << endl;

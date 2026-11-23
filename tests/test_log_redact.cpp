@@ -97,6 +97,22 @@ static void testUrlCredentials() {
     expectEq("user only", redactUrlUserInfo("rtsp://u@h/x"), "rtsp://u@h/x");
     expectEq("not a url", redactUrlUserInfo("a:b@c"), "a:b@c");
 
+    // Passwords holding unencoded '/', '?', '#' or '&'; a port before an '@' in the path is not a password.
+    expectEq("password slash", redactUrlUserInfo("rtsp://u:p/w@h/x"), "rtsp://u:***@h/x");
+    expectEq("password question", redactUrlUserInfo("rtsp://u:p?w@h/x"), "rtsp://u:***@h/x");
+    expectEq("password hash", redactUrlUserInfo("rtsp://u:p#w@h/x"), "rtsp://u:***@h/x");
+    expectEq("password amp", redactUrlUserInfo("rtsp://u:p&w@h/x"), "rtsp://u:***@h/x");
+    expectEq("port then path @", redactUrlUserInfo("rtsp://h:554/live/a@b"), "rtsp://h:554/live/a@b");
+    expectEq("userinfo then path @", redactUrlUserInfo("rtsp://u:p@h/live/a@b"), "rtsp://u:***@h/live/a@b");
+    expectEq("url ends at next url", redactUrlUserInfo("rtsp://h:554/a?cb=http://u:p@g/x"), "rtsp://h:554/a?cb=http://u:***@g/x");
+    expectEq("url ends at quote", redactUrlUserInfo("'rtsp://h/x' u:p@g"), "'rtsp://h/x' u:p@g");
+    // Many URLs without '@' stay linear: a quadratic scan of this would take minutes.
+    string many;
+    for (int i = 0; i < 200000; ++i) {
+        many += "a://b/";
+    }
+    expectTrue("many urls", redactUrlUserInfo(many) == many);
+
     expectEq("query url userinfo", redactQuery("/index/api/addStreamProxy?url=rtsp://u:p@h/x&app=a"),
              "/index/api/addStreamProxy?url=rtsp://u:***@h/x&app=a");
     expectEq("query nested raw token", redactQuery("/index/api/addStreamProxy?url=rtsp://h/live?token=t&app=a"),
@@ -109,6 +125,22 @@ static void testUrlCredentials() {
     expectEq("query encoded no secret", redactQuery("/a?url=rtsp%3A%2F%2Fh%2Fs&app=a"), "/a?url=rtsp%3A%2F%2Fh%2Fs&app=a");
     expectEq("form url userinfo", redactBodyForLog("application/x-www-form-urlencoded", "url=rtsp%3A%2F%2Fu%3Ap%40h%2Fx&app=a"),
              "url=rtsp://u:***@h/x&app=a");
+
+    expectEq("query key before =", redactQuery("rtsp://u:p@h/x;transport=tcp"), "rtsp://u:***@h/x;transport=tcp");
+    expectEq("query encoded bare query", redactQuery("/a?params=a%3D1%26token%3Dt&app=a"), "/a?params=a=1&token=***&app=a");
+    // A form body is masked before it is cut, so a URL password at the cut is not revealed.
+    auto pad = string(kMaxLogBody - 20, 'x');
+    auto cut_form = redactBodyForLog("application/x-www-form-urlencoded", "pad=" + pad + "&url=rtsp://admin:secretpw@h/x");
+    expectTrue("form cut after mask", cut_form.find("secr") == string::npos && cut_form.size() <= kMaxLogBody);
+
+    expectTrue("header prefixed cookie", isSecretHeader("header.Cookie"));
+    expectTrue("header prefixed proxy", isSecretHeader("header.Proxy-Authorization"));
+    expectTrue("header set-cookie", isSecretHeader("Set-Cookie"));
+    expectTrue("header prefixed host", !isSecretHeader("header.Host"));
+    auto access = parse(R"({"header.Cookie":"session=abc; sid=xyz","header.Host":"h"})");
+    redactHookBody(access);
+    expectEq("hook header cookie", access["header.Cookie"].asString(), kRedacted);
+    expectEq("hook header host", access["header.Host"].asString(), "h");
 
     expectTrue("key passPhrase", isSecretQueryKey("srt.passPhrase"));
     expectTrue("key icePwd", isSecretQueryKey("rtc.icePwd"));

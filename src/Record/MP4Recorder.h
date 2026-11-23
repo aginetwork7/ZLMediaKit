@@ -86,6 +86,11 @@ private:
     std::string _full_path_tmp;
     RecordInfo _info;
     MP4Muxer::Ptr _muxer;
+    // 上次建文件失败的时间（0 表示没失败过）。存储掉线时建文件会失败，按固定间隔重试，
+    // 存储恢复后录像能在几秒内接上，不必等到下一个切片时间
+    // Last time creating the file failed (0 = never). Retried at a fixed interval while storage
+    // is offline, so recording resumes within seconds once it is back instead of at the next slice
+    uint64_t _create_failed_ms = 0;
     std::list<Track::Ptr> _tracks;
 };
 

@@ -141,6 +141,12 @@ public:
      */
     void closeMP4();
 
+    /**
+     * 文件最近一次写失败的错误码（负的 errno），没失败过为 0
+     * Last write error of the file (negative errno), 0 if none
+     */
+    int writeError() const { return _mp4_file ? _mp4_file->writeError() : 0; }
+
 protected:
     MP4FileIO::Writer createWriter() override;
 

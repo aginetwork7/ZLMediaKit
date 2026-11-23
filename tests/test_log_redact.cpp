@@ -94,7 +94,9 @@ static void testUrlCredentials() {
     expectEq("userinfo two urls", redactUrlUserInfo("a rtsp://u:p@h/x b rtmp://v:q@g/y"), "a rtsp://u:***@h/x b rtmp://v:***@g/y");
     expectEq("userinfo @ in password", redactUrlUserInfo("rtsp://u:p@ss@h/x"), "rtsp://u:***@h/x");
     expectEq("no userinfo", redactUrlUserInfo("rtsp://h:554/live/a@b"), "rtsp://h:554/live/a@b");
-    expectEq("user only", redactUrlUserInfo("rtsp://u@h/x"), "rtsp://u@h/x");
+    // A userinfo without ':' may be a token used as the user name: masked whole.
+    expectEq("user only", redactUrlUserInfo("rtsp://u@h/x"), "rtsp://***@h/x");
+    expectEq("user only with port", redactUrlUserInfo("https://tok@h:8443/x"), "https://***@h:8443/x");
     expectEq("not a url", redactUrlUserInfo("a:b@c"), "a:b@c");
 
     // Passwords holding unencoded '/', '?', '#' or '&'; a port before an '@' in the path is not a password.
@@ -142,6 +144,25 @@ static void testUrlCredentials() {
     expectEq("hook header cookie", access["header.Cookie"].asString(), kRedacted);
     expectEq("hook header host", access["header.Host"].asString(), "h");
 
+    // Token/secret-style keys by suffix; a key that only starts with one is not a secret key.
+    for (auto key : { "access_token", "auth_token", "refreshToken", "apiSecret", "client_secret", "jwt", "JWT" }) {
+        expectTrue(string("key ") + key, isSecretQueryKey(key));
+    }
+    expectTrue("key tokenExpire", !isSecretQueryKey("tokenExpire"));
+    expectEq("nested access_token", redactQuery("/index/api/addStreamProxy?url=https://cdn/x?access_token=t&app=a"),
+             "/index/api/addStreamProxy?url=https://cdn/x?access_token=***&app=a");
+    // URL passwords holding '?', '&' or '=' are masked before the query is split.
+    expectEq("password eq in query", redactQuery("/a?url=rtsp://u:p=w@h/x&app=a"), "/a?url=rtsp://u:***@h/x&app=a");
+    expectEq("password amp in query", redactQuery("url=rtsp://u:p&w@h/x&app=a"), "url=rtsp://u:***@h/x&app=a");
+    expectEq("password question in query", redactQuery("url=rtsp://u:p?w@h/x"), "url=rtsp://u:***@h/x");
+    auto eq_json = parse(R"({"originUrl":"rtmp://u:a=b&c@h/live/s"})");
+    redactJsonForLog(eq_json);
+    expectEq("json password eq amp", eq_json["originUrl"].asString(), "rtmp://u:***@h/live/s");
+    // A bare query with a raw '?' in a later value still masks the secrets before it.
+    expectEq("bare query raw ?", redactQuery("secret=s&url=rtsp://h/ch?channel=1&token=t"), "secret=***&url=rtsp://h/ch?channel=1&token=***");
+    expectEq("form raw ?", redactBodyForLog("application/x-www-form-urlencoded", "api.secret=s&password=p&url=rtsp://h/ch?channel=1"),
+             "api.secret=***&password=***&url=rtsp://h/ch?channel=1");
+
     expectTrue("key passPhrase", isSecretQueryKey("srt.passPhrase"));
     expectTrue("key icePwd", isSecretQueryKey("rtc.icePwd"));
     expectTrue("key password", isSecretQueryKey("password"));
@@ -173,6 +194,33 @@ static void testDeepJson() {
     expectEq("deep json body", redactBodyForLog("application/json", deep_object), "<json, " + to_string(deep_object.size()) + " bytes>");
     auto deep_array = string(2000, '[') + string(2000, ']');
     expectEq("deep json response", redactResponseForLog(deep_array), deep_array);
+}
+
+// SDP, headers, other bodies and decoded values.
+static void testOtherText() {
+    auto sdp = string("v=0\r\na=ice-ufrag:u1\r\na=ice-pwd:p1\r\na=fingerprint:sha-256 AA\r\na=ice-pwd:p2");
+    auto want = string("v=0\r\na=ice-ufrag:u1\r\na=ice-pwd:***\r\na=fingerprint:sha-256 AA\r\na=ice-pwd:***");
+    expectEq("sdp ice-pwd", redactStringForLog(sdp), want);
+    expectEq("sdp body", redactBodyForLog("application/sdp", sdp), want);
+    expectEq("sdp response", redactResponseForLog(sdp), want);
+    auto sdp_json = parse(R"({"code":0,"sdp":"v=0\r\na=ice-pwd:p1\r\n"})");
+    redactJsonForLog(sdp_json);
+    expectEq("json sdp ice-pwd", sdp_json["sdp"].asString(), "v=0\r\na=ice-pwd:***\r\n");
+    expectEq("sdp without ice-pwd", redactStringForLog("v=0\r\na=rtpmap:96 H264/90000"), "v=0\r\na=rtpmap:96 H264/90000");
+
+    expectEq("text body", redactBodyForLog("text/plain", "secret=s&app=a"), "secret=***&app=a");
+    expectEq("no content type body", redactBodyForLog("", "url=rtsp://u:p@h/x"), "url=rtsp://u:***@h/x");
+
+    expectEq("header authorization", redactHeaderForLog("Authorization", "Bearer x"), kRedacted);
+    expectEq("header x-auth-token", redactHeaderForLog("X-Auth-Token", "t"), kRedacted);
+    expectEq("header referer", redactHeaderForLog("Referer", "http://h/p?token=t"), "http://h/p?token=***");
+    expectEq("header host", redactHeaderForLog("Host", "h:8080"), "h:8080");
+
+    // An encoded URL with no '=' is decoded and masked; decoded control characters cannot add log lines.
+    expectEq("encoded url string", redactStringForLog("rtsp%3A%2F%2Fu%3Ap%40h%2Fx"), "rtsp://u:***@h/x");
+    expectEq("decoded control chars", redactQuery("/a?url=rtsp%3A%2F%2Fu%3Ap%40h%2Fx%0D%0Afake"), "/a?url=rtsp://u:***@h/x..fake");
+    // An encoded secret key is a secret key.
+    expectEq("encoded key", redactQuery("/a?%74oken=t&app=a"), "/a?%74oken=***&app=a");
 }
 
 // Hook bodies: authorization and api.secret masked whole, params keeps everything but its token.
@@ -250,6 +298,7 @@ int main() {
     testHook();
     testUrlCredentials();
     testDeepJson();
+    testOtherText();
 
     if (s_failed) {
         cerr << s_failed << " check(s) failed" << endl;

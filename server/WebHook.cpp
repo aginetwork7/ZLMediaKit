@@ -212,7 +212,7 @@ void do_http_hook(const string &url, const ArgsType &body, const function<void(c
             if (!err.empty()) {
                 // hook失败  [AUTO-TRANSLATED:68231f46]
                 // Hook failed
-                WarnL << "hook " << url << " " << ticker.elapsedTime() << "ms,failed" << err << ":" << to_log_string(body);
+                WarnL << "hook " << redactStringForLog(url) << " " << ticker.elapsedTime() << "ms,failed" << err << ":" << to_log_string(body);
 
                 if (retry-- > 0 && should_retry) {
                     requester->getPoller()->doDelayTask(MAX(retry_delay, 0.0) * 1000, [url, body, func, retry] {
@@ -227,7 +227,7 @@ void do_http_hook(const string &url, const ArgsType &body, const function<void(c
             } else if (ticker.elapsedTime() > 500) {
                 // hook成功，但是hook响应超过500ms，打印警告日志  [AUTO-TRANSLATED:e03557aa]
                 // Hook succeeded, but hook response exceeded 500ms, print warning log
-                DebugL << "hook " << url << " " << ticker.elapsedTime() << "ms,success:" << to_log_string(body);
+                DebugL << "hook " << redactStringForLog(url) << " " << ticker.elapsedTime() << "ms,success:" << to_log_string(body);
             }
 
             if (func) {

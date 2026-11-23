@@ -292,7 +292,7 @@ static inline void addHttpListener(){
                 log << "# header:\r\n";
 
                 for (auto &pr : parser.getHeader()) {
-                    log << pr.first << " : " << (isSecretHeader(pr.first) ? kRedacted : pr.second) << "\r\n";
+                    log << pr.first << " : " << redactHeaderForLog(pr.first, pr.second) << "\r\n";
                 }
 
                 log << "# content:\r\n" << redactBodyForLog(parser["Content-Type"], parser.content()) << "\r\n";

@@ -15,7 +15,6 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include "Util/File.h"
-#include "Util/util.h"
 #include "Common/config.h"
 #include "MP4Recorder.h"
 #include "MP4Demuxer.h"
@@ -86,15 +85,8 @@ void MP4Recorder::createFile() {
             _muxer->addTrack(track);
         }
         _full_path_tmp = full_path_tmp;
-        _create_failed_ms = 0;
     } catch (std::exception &ex) {
         WarnL << ex.what();
-        // 没打开文件的 muxer 不能留着：留着时直到下一个切片时间（mp4_max_second）才会重试，
-        // 存储恢复后要几分钟才接上录像
-        // Do not keep a muxer without a file: kept, it is not retried until the next slice
-        // (mp4_max_second), so recording resumes minutes after storage comes back
-        _muxer = nullptr;
-        _create_failed_ms = getCurrentMillisecond();
     }
 }
 
@@ -194,15 +186,6 @@ bool MP4Recorder::inputFrame(const Frame::Ptr &frame) {
         return false;
     }
 
-    if (!_muxer && _create_failed_ms) {
-        // 存储不可用期间按间隔重试建文件，有视频时从关键帧开始
-        // While storage is unavailable, retry creating the file at an interval, starting at a keyframe with video
-        static constexpr uint64_t kCreateRetryMs = 5000;
-        if (getCurrentMillisecond() - _create_failed_ms < kCreateRetryMs || (_have_video && !frame->keyFrame())) {
-            return false;
-        }
-    }
-
     auto stamp_inc = _delta_stamp[frame->getTrackType()].relativeStamp(frame->pts(), false);
     if (!_muxer || (stamp_inc > int64_t(_max_second) * 1000 && (!_have_video || frame->keyFrame()))) {
         // 成立条件  [AUTO-TRANSLATED:8c9c6083]
@@ -222,19 +205,7 @@ bool MP4Recorder::inputFrame(const Frame::Ptr &frame) {
     if (_muxer) {
         // 生成mp4文件  [AUTO-TRANSLATED:76a8d77c]
         // Generate mp4 file
-        auto ret = _muxer->inputFrame(frame);
-        if (auto err = _muxer->writeError()) {
-            // 写失败（拔盘、只读重挂载、磁盘满）：放弃这个文件，按间隔重新建文件。不收尾，
-            // 收尾要往同一个坏文件里写；留下的隐藏临时文件由孤儿文件恢复处理
-            // Write failed (pulled disk, read-only remount, full disk): drop this file and retry
-            // creating one at an interval. Not finalized, which would write to the same broken file;
-            // the hidden temp file left behind is handled by orphan recovery
-            WarnL << "mp4 record write failed: " << strerror(-err) << ", drop " << _full_path_tmp << " and retry";
-            _muxer = nullptr;
-            _create_failed_ms = getCurrentMillisecond();
-            return false;
-        }
-        return ret;
+        return _muxer->inputFrame(frame);
     }
     return false;
 }

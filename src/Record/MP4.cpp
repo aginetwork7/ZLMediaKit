@@ -154,22 +154,11 @@ int MP4FileDisk::onWrite(const void *data, size_t bytes) {
     }
     // 区分磁盘满(ENOSPC)、只读重挂载(EROFS)、设备移除(ENODEV)等，取不到时退回 -EIO
     // Tell disk full (ENOSPC), read-only remount (EROFS), device gone (ENODEV) apart; fall back to -EIO
-    _write_error = errno > 0 ? -errno : -EIO;
-    return _write_error;
+    return errno > 0 ? -errno : -EIO;
 }
 
 int MP4FileDisk::onSeek(uint64_t offset) {
     return fseek64(_file.get(), offset, SEEK_SET);
-}
-
-int MP4FileDisk::writeError() const {
-    if (_write_error) {
-        return _write_error;
-    }
-    // 写进 stdio 缓冲时不报错，缓冲刷盘失败（常发生在 libmov 回头 seek 改 box 大小时）只体现在流的错误标志上
-    // Writes into the stdio buffer do not fail; a failed flush (often on libmov's seek back to patch a
-    // box size) only shows in the stream's error flag
-    return _file && ferror(_file.get()) ? -EIO : 0;
 }
 
 uint64_t MP4FileDisk::onTell() {

@@ -135,15 +135,6 @@ public:
      */
     void closeFile();
 
-    /**
-     * 最近一次写失败的错误码（负的 errno），没失败过为 0。拔盘、只读重挂载、磁盘满时写会失败，
-     * 录像据此放弃这个文件、重新建文件，不必等到下一个切片
-     * Last write error (negative errno), 0 if none. Writes fail on a pulled disk, a read-only
-     * remount or a full disk; recording uses this to drop the file and create a new one
-     * instead of waiting for the next slice
-     */
-    int writeError() const;
-
 protected:
     uint64_t onTell() override;
     int onSeek(uint64_t offset) override;
@@ -152,7 +143,6 @@ protected:
 
 private:
     std::shared_ptr<FILE> _file;
-    int _write_error = 0;
 };
 
 class MP4FileMemory : public MP4FileIO{

@@ -87,6 +87,13 @@ public:
 
     // Set absolute time base (Unix ms) used by RTSP RTP extension timestamps.
     void setRtpExtTimeBaseMS(uint64_t base_ms);
+    // 直播 RTSP 的 RTCP SR 时间按帧时间戳线性换算，见 RtspMuxer::setNtpFollowStamp
+    // Live RTSP RTCP SR times follow the frame stamps linearly, see RtspMuxer::setNtpFollowStamp
+    void setRtspNtpFollowStamp(bool on);
+    // 0 表示未设置（直播，或回放还没定好窗口起点） / 0 when unset (live, or a replay whose window is not set yet)
+    uint64_t getRtpExtTimeBaseMS() const;
+    // 点播时长（秒），直播为 0 / VOD duration in seconds, 0 for live
+    float getDuration() const { return _dur_sec; }
 
     /**
      * 重置平滑发送缓存并重同步时间轴
@@ -97,6 +104,21 @@ public:
      * 设置平滑发送的播放速率，用于回放变速
      */
     void setSpeed(float speed);
+
+    /**
+     * 获取帧环形缓存（不存在时创建），用于在进程内旁路订阅本流的帧（如打码会话）；必须在归属线程调用。
+     * 订阅者会计入观看人数。
+     * Get the frame ring (created on demand) to tap this stream's frames in-process (e.g. mask
+     * sessions); must be called on the owner poller. Its readers count as viewers.
+     */
+    RingType::Ptr getFrameRing(size_t gop_count = 1);
+
+    /**
+     * 所有 track 就绪后立即注册 rtsp 源，不等第一帧（打码流用）；必须在归属线程调用
+     * Register the rtsp source as soon as all tracks are ready, before the first frame (masked streams);
+     * must be called on the owner poller
+     */
+    void registRtspWithoutData();
 
     /**
      * 重置track
@@ -234,6 +256,9 @@ protected:
      */
     bool onTrackFrame(const Frame::Ptr &frame) override;
     bool onTrackFrame_l(const Frame::Ptr &frame);
+    // 用 app/stream 而不是 shortUrl()：拉流代理的源地址里可能带账号密码
+    // app/stream instead of shortUrl(): a proxy's origin url may carry credentials
+    std::string sinkName() const override { return _tuple.shortUrl(); }
 
 private:
     void createGopCacheIfNeed(size_t gop_count);

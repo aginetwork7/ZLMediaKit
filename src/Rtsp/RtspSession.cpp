@@ -19,6 +19,7 @@
 #include "RtpMultiCaster.h"
 #include "Rtcp/RtcpContext.h"
 #include "json/json.h"
+#include "Mask/MaskSource.h"
 
 #ifdef ENABLE_OPENSSL
 #include <openssl/sha.h>
@@ -1153,6 +1154,37 @@ void RtspSession::handleReq_Play(const Parser &parser) {
         _play_quota_is_replay = is_replay;
     }
 
+    // 打码流：PLAY 时才建立 edge-mask 会话（DESCRIBE 探测不占引擎资源）；引擎拒绝或不可用时回 503
+    // Masked stream: the edge-mask session starts at PLAY (a DESCRIBE probe costs nothing); 503 when refused
+    if (!_mask_acquired) {
+        weak_ptr<RtspSession> weak_self = static_pointer_cast<RtspSession>(shared_from_this());
+        Parser parser_copy = parser;
+        auto waiting = MaskSource::acquire(*play_src, getPoller(), [weak_self, parser_copy](bool ok, const string &code) {
+            auto strong_self = weak_self.lock();
+            if (!strong_self) {
+                return;
+            }
+            if (!ok) {
+                WarnP(strong_self.get()) << "mask: play refused, edge-mask " << code;
+                strong_self->sendRtspResponse("503 Service Unavailable", {"Connection", "Close"});
+                strong_self->shutdown(SockException(Err_shutdown, "mask session unavailable: " + code));
+                return;
+            }
+            strong_self->_mask_acquired = true;
+            try {
+                strong_self->handleReq_Play(parser_copy);
+            } catch (SockException &ex) {
+                strong_self->shutdown(ex);
+            } catch (std::exception &ex) {
+                strong_self->shutdown(SockException(Err_shutdown, ex.what()));
+            }
+        });
+        if (waiting) {
+            return;
+        }
+        _mask_acquired = true;
+    }
+
     // seek 会重建 reader，必须始终从 GOP 缓存起播，否则会错过 seek 期间已写入的关键帧。
     const bool use_gop = true;
     auto &strScale = parser["Scale"];
@@ -1171,6 +1203,36 @@ void RtspSession::handleReq_Play(const Parser &parser) {
     if (!speed_header_name.empty()) {
         //播放速度，兼容Scale与Speed两种头
         auto speed = atof(speed_value.data());
+        // 打码回放：改倍速前先问 edge-mask（按新倍速重新准入），资源不够时回 453 并保持原倍速，不断开会话
+        // Masked replay: ask edge-mask before changing speed (re-admission at the new speed); 453 and keep the old
+        // speed when refused, without dropping the session
+        if (_mask_speed_granted != (float)speed) {
+            weak_ptr<RtspSession> weak_self = static_pointer_cast<RtspSession>(shared_from_this());
+            Parser parser_copy = parser;
+            auto waiting = MaskSource::requestSpeed(*play_src, (float)speed, getPoller(), [weak_self, parser_copy, speed](bool ok, const string &reason) {
+                auto strong_self = weak_self.lock();
+                if (!strong_self) {
+                    return;
+                }
+                if (!ok) {
+                    WarnP(strong_self.get()) << "mask: speed " << speed << " refused, edge-mask " << reason;
+                    strong_self->sendRtspResponse("453 Not Enough Bandwidth");
+                    return;
+                }
+                strong_self->_mask_speed_granted = (float)speed;
+                try {
+                    strong_self->handleReq_Play(parser_copy);
+                } catch (SockException &ex) {
+                    strong_self->shutdown(ex);
+                } catch (std::exception &ex) {
+                    strong_self->shutdown(SockException(Err_shutdown, ex.what()));
+                }
+            });
+            if (waiting) {
+                return;
+            }
+        }
+        _mask_speed_granted = -1;
         play_src->speed(speed);
         res_header.emplace(speed_header_name, speed_value);
         InfoP(this) << "rtsp set play speed via " << speed_header_name << ":" << speed;

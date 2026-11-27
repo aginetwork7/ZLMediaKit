@@ -107,7 +107,15 @@ void RtspMuxer::injectRtpExtUnixSec(RtpPacket::Ptr &in, uint32_t unix_sec) const
 }
 
 void RtspMuxer::onRtp(RtpPacket::Ptr in, bool is_key) {
-    if (_live) {
+    if (_live && _ntp_follow_stamp) {
+        // in->ntp_stamp 此时是帧的 64 位时间戳（毫秒），所有 track 共用第一个包的时间戳作起点
+        // in->ntp_stamp is still the frame's 64-bit stamp (ms); all tracks share the first packet's as the origin
+        if (!_have_stamp_base) {
+            _have_stamp_base = true;
+            _stamp_base = in->ntp_stamp;
+        }
+        in->ntp_stamp = (uint64_t)((int64_t)_ntp_stamp_start + ((int64_t)in->ntp_stamp - (int64_t)_stamp_base));
+    } else if (_live) {
         auto &ref = _tracks[in->track_index];
         if (ref.rtp_stamp != in->getHeader()->stamp) {
             // rtp时间戳变化才计算ntp，节省cpu资源  [AUTO-TRANSLATED:729d54f2]
@@ -288,6 +296,7 @@ void RtspMuxer::resetTracks() {
     _sdp.clear();
     _tracks.clear();
     _video_ext_bootstrapped = false;
+    _have_stamp_base = false;
     CLEAR_ARR(_track_existed);
 }
 

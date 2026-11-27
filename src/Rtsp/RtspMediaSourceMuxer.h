@@ -54,9 +54,17 @@ public:
         RtspMuxer::setRtpExtTimeBaseMS(base_ms);
     }
 
+    void setNtpFollowStamp(bool on) {
+        RtspMuxer::setNtpFollowStamp(on);
+    }
+
     void dropCachedFrame() {
         RtspMuxer::dropCachedFrame();
         _media_src->clearCache();
+    }
+
+    void registWithoutData() {
+        _media_src->registWithoutData();
     }
 
     void addTrackCompleted() override {

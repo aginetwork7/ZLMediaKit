@@ -322,6 +322,16 @@ void MultiMediaSourceMuxer::setRtpExtTimeBaseMS(uint64_t base_ms) {
     }
 }
 
+void MultiMediaSourceMuxer::setRtspNtpFollowStamp(bool on) {
+    if (_rtsp) {
+        _rtsp->setNtpFollowStamp(on);
+    }
+}
+
+uint64_t MultiMediaSourceMuxer::getRtpExtTimeBaseMS() const {
+    return _rtsp ? _rtsp->getRtpExtTimeBaseMS() : 0;
+}
+
 void MultiMediaSourceMuxer::setSpeed(float speed) {
     if (_paced_sender) {
         _paced_sender->setSpeed(speed);
@@ -813,6 +823,17 @@ void MultiMediaSourceMuxer::onAllTrackReady() {
         _delegate->addTrackCompleted();
     }
     InfoL << "stream: " << shortUrl() << " , codec info: " << getTrackInfoStr(this);
+}
+
+MultiMediaSourceMuxer::RingType::Ptr MultiMediaSourceMuxer::getFrameRing(size_t gop_count) {
+    createGopCacheIfNeed(gop_count);
+    return _ring;
+}
+
+void MultiMediaSourceMuxer::registRtspWithoutData() {
+    if (_rtsp) {
+        _rtsp->registWithoutData();
+    }
 }
 
 void MultiMediaSourceMuxer::createGopCacheIfNeed(size_t gop_count) {

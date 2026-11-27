@@ -177,6 +177,13 @@ public:
      */
     void onWrite(RtpPacket::Ptr rtp, bool keyPos) override;
 
+    /**
+     * 不等第一个 rtp 包就注册（已有 sdp 时）。用于打码流：DESCRIBE 时就要能找到，画面在 PLAY 之后才产生
+     * Register before the first rtp packet (once the sdp is set). Used by masked streams, which must be
+     * found at DESCRIBE although their video only starts after PLAY
+     */
+    void registWithoutData();
+
     void clearCache() override{
         PacketCache<RtpPacket>::clearCache();
         if (_ring) {
@@ -185,6 +192,8 @@ public:
     }
 
 private:
+    void createRing();
+
     /**
      * 批量flush rtp包时触发该函数
      * @param rtp_list rtp包列表

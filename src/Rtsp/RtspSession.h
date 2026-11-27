@@ -282,6 +282,10 @@ private:
 
     // 真实 active 播放会话配额持有标记（进入 PLAY 后置位，析构时归还）
     bool _play_quota_acquired = false;
+    // 打码流的 edge-mask 会话已建立（PLAY 前确认一次）/ edge-mask session of a masked stream is up (checked once before PLAY)
+    bool _mask_acquired = false;
+    // edge-mask 已接受、本次 PLAY 要生效的倍速（-1 表示没有）/ Speed accepted by edge-mask for this PLAY (-1: none)
+    float _mask_speed_granted = -1;
     bool _play_quota_is_replay = false;
 };
 

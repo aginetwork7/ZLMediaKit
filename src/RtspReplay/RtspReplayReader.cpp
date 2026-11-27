@@ -724,7 +724,13 @@ uint64_t RtspReplayReader::offsetToAbsolute(uint32_t offset_ms) const {
 }
 
 uint64_t RtspReplayReader::offsetToSessionNpt(uint64_t offset_ms) const {
-    return offset_ms > _window_begin_offset_ms ? (offset_ms - _window_begin_offset_ms) : 0;
+    // 会话 NPT 以窗口起点为原点（与 seek 目标、currentNptMs 同一时间轴）。按绝对时间算：窗口起点早于第一个分片时
+    // _window_begin_offset_ms 被钳到 0，用偏移相减会让帧的 NPT 比 seek 目标少"窗口起点到第一个分片"这段时间
+    // The session NPT is relative to the window begin (the timeline of seek targets and currentNptMs). Computed from
+    // absolute times: when the window begins before the first segment, _window_begin_offset_ms is clamped to 0, and
+    // subtracting offsets would put every frame short of the seek target by the gap before the first segment
+    auto abs_ms = offsetToAbsolute((uint32_t)std::min<uint64_t>(offset_ms, std::numeric_limits<uint32_t>::max()));
+    return abs_ms > _window_begin_at_ms ? (abs_ms - _window_begin_at_ms) : 0;
 }
 
 // 所有送进 _muxer 的帧都必须经过这里

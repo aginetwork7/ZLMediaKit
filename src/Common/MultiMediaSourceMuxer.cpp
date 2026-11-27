@@ -322,6 +322,12 @@ void MultiMediaSourceMuxer::setRtpExtTimeBaseMS(uint64_t base_ms) {
     }
 }
 
+void MultiMediaSourceMuxer::setRtspNtpFollowStamp(bool on) {
+    if (_rtsp) {
+        _rtsp->setNtpFollowStamp(on);
+    }
+}
+
 uint64_t MultiMediaSourceMuxer::getRtpExtTimeBaseMS() const {
     return _rtsp ? _rtsp->getRtpExtTimeBaseMS() : 0;
 }

@@ -77,6 +77,15 @@ public:
     void setRtpExtTimeBaseMS(uint64_t base_ms);
     uint64_t getRtpExtTimeBaseMS() const { return _rtp_ext_time_base_ms; }
 
+    // 直播时 RTCP SR 的 NTP 时间直接按帧时间戳线性换算，不做音视频对齐。用于各 track 时间戳已在同一时间轴上、
+    // 但到达有固定先后的流（打码流：视频经引擎晚到，音频直通）：对齐会在开头把视频的 NTP 拉到音频上，
+    // 之后再修正回来，用 SR 定时的播放器（ffmpeg、VLC）会看到一次画面跳变
+    // Live only: the RTCP SR NTP time follows the frame stamps linearly, without aligning tracks. For streams whose
+    // tracks already share one timeline but arrive with a fixed offset (masked streams: video comes late through
+    // the engine, audio passes through): aligning would first pull the video NTP onto the audio and later correct
+    // it back, a one-time jump for players timed by SR (ffmpeg, VLC)
+    void setNtpFollowStamp(bool on) { _ntp_follow_stamp = on; }
+
     /**
      * 添加ready状态的track
      * Add a ready state track
@@ -125,6 +134,9 @@ private:
 
 private:
     bool _live = true;
+    bool _ntp_follow_stamp = false;
+    bool _have_stamp_base = false;
+    uint64_t _stamp_base = 0;
     bool _track_existed[2] = { false, false };
 
     uint8_t _index {0};

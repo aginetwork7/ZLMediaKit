@@ -87,6 +87,9 @@ public:
 
     // Set absolute time base (Unix ms) used by RTSP RTP extension timestamps.
     void setRtpExtTimeBaseMS(uint64_t base_ms);
+    // 直播 RTSP 的 RTCP SR 时间按帧时间戳线性换算，见 RtspMuxer::setNtpFollowStamp
+    // Live RTSP RTCP SR times follow the frame stamps linearly, see RtspMuxer::setNtpFollowStamp
+    void setRtspNtpFollowStamp(bool on);
     // 0 表示未设置（直播，或回放还没定好窗口起点） / 0 when unset (live, or a replay whose window is not set yet)
     uint64_t getRtpExtTimeBaseMS() const;
     // 点播时长（秒），直播为 0 / VOD duration in seconds, 0 for live

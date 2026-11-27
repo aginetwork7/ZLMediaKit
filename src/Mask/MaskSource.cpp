@@ -196,6 +196,14 @@ bool MaskSource::setup() {
         _muxer = make_shared<MultiMediaSourceMuxer>(_out_tuple, _replay ? src_muxer->getDuration() : 0.0, option);
     }
     syncRtpExtTime();
+    // 视频经引擎晚到、音频直通，两者时间戳本来就在源流的同一时间轴上：RTCP SR 按时间戳换算，不再对齐音视频，
+    // 否则视频比音频晚超过 300 毫秒时（Jetson 上常见）开头约 5 秒处画面跳一下
+    // Video comes late through the engine and audio passes through, both already on the source timeline: SR times
+    // follow the stamps instead of aligning the tracks, which made the picture jump once about 5 s in whenever
+    // video lagged audio by more than 300 ms (common on Jetson)
+    if (!_replay) {
+        _muxer->setRtspNtpFollowStamp(true);
+    }
     _muxer->setMediaListener(shared_from_this());
     for (auto &track : src_muxer->getTracks(true)) {
         if (track->getTrackType() == TrackVideo) {
